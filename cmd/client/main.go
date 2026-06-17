@@ -178,6 +178,7 @@ func main() {
 		TransportUDP: cfg.TURN.TransportUDP,
 		Profile:      string(cfg.Obf.Profile),
 		ObfKey:       cfg.Obf.Key,
+		ObfTiming:    cfg.Obf.Timing,
 		GetCreds:     udprelay.GetCredsFunc(getCreds),
 		ClientID:     cfg.ClientID,
 	}

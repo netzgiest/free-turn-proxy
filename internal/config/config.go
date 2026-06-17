@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/kcptun"
 	"github.com/samosvalishe/free-turn-proxy/internal/uri"
@@ -59,9 +60,10 @@ const (
 
 // ObfOpts - опции обфускации TURN-payload.
 type ObfOpts struct {
-	Profile ObfProfile // -obf-profile: none (default) | rtpopus | rtpopus2
-	Key     []byte     // -obf-key (декодированный): 32-байтовый общий ключ; nil если Profile=none
-	GenKey  bool       // -gen-obf-key: напечатать новый ключ и выйти
+	Profile ObfProfile    // -obf-profile: none (default) | rtpopus | rtpopus2
+	Key     []byte        // -obf-key (декодированный): 32-байтовый общий ключ; nil если Profile=none
+	GenKey  bool          // -gen-obf-key: напечатать новый ключ и выйти
+	Timing  time.Duration // -obf-timing: межпакетная задержка (RTP-мимикрия); 0=выкл
 }
 
 // Enabled возвращает true когда выбран реальный профиль обфускации.
@@ -185,6 +187,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	obfProfile := fs.String("obf-profile", string(ObfProfileNone), "wire-профиль обфускации: none | rtpopus | rtpopus2; должен совпадать с сервером")
 	obfKey := fs.String("obf-key", "", "ключ для -obf-profile != none: 32 байта hex (64 символа)")
 	genObfKey := fs.Bool("gen-obf-key", false, "напечатать новый -obf-key и выйти")
+	obfTiming := fs.Duration("obf-timing", 0, "межпакетная задержка для RTP-мимикрии (напр. 20ms); 0=выкл")
 	streamsPerCred := fs.Int("streams-per-cred", defaultStreamsPerCache, "TURN-потоков на один кеш VK-creds; только -provider vk")
 	debug := fs.Bool("debug", false, "подробные debug-логи")
 	manualCaptcha := fs.Bool("manual-captcha", false, "ручная VK captcha в браузере вместо авто; только -provider vk")
@@ -208,6 +211,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 		Obf: ObfOpts{
 			Profile: ObfProfile(*obfProfile),
 			GenKey:  *genObfKey,
+			Timing:  *obfTiming,
 		},
 		Proxy: ProxyOpts{
 			Mode:   ClientProxyMode(*mode, *bond),
