@@ -87,10 +87,10 @@ const (
 
 // VKOpts - опции VK-учёток и captcha (только клиент, провайдер "vk").
 type VKOpts struct {
-	Link           string  // -link (нормализован до join-кода)
-	StreamsPerCred int     // -streams-per-cred
-	ManualCaptcha  bool    // -manual-captcha
-	Browser        Browser // -browser: chrome | firefox
+	Links          []string // -links (нормализованные join-коды); несколько = больше стримов
+	StreamsPerCred int      // -streams-per-cred
+	ManualCaptcha  bool     // -manual-captcha
+	Browser        Browser  // -browser: chrome | firefox
 }
 
 // ProviderOpts выбирает реализацию provider.Provider.
@@ -175,7 +175,8 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	port := fs.String("port", "", "порт TURN-сервера; override creds провайдера")
 	listen := fs.String("listen", "127.0.0.1:9000", "локальный ip:port для WireGuard/Xray клиента")
 	provider := fs.String("provider", ProviderVK, "источник TURN-creds: vk")
-	link := fs.String("link", "", "ссылка VK Calls https://vk.ru/call/join/...; обязательно для -provider vk")
+	link := fs.String("link", "", "(устарел) одна ссылка VK Calls, используйте -links")
+	links := fs.String("links", "", "ссылки VK Calls через запятую: https://vk.ru/call/join/...,https://vk.ru/call/join/...")
 	peer := fs.String("peer", "", "адрес сервера на VPS, host:port; обязательно")
 	n := fs.Int("n", 10, "число параллельных TURN-потоков")
 	transport := fs.String("transport", "tcp", "транспорт до TURN-реле: tcp | udp")
@@ -323,8 +324,8 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	}
 	switch c.Provider.Name {
 	case ProviderVK:
-		if *link == "" {
-			return nil, errors.New("need -link (required for -provider vk)")
+		if *links == "" && *link == "" {
+			return nil, errors.New("need -links (или -link) (required for -provider vk)")
 		}
 		if c.VK.StreamsPerCred <= 0 {
 			return nil, fmt.Errorf("-streams-per-cred must be positive")
@@ -334,12 +335,28 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 		default:
 			return nil, fmt.Errorf("invalid -browser value %q: must be %s | %s", c.VK.Browser, BrowserChrome, BrowserFirefox)
 		}
-		parts := strings.Split(*link, "join/")
-		link := parts[len(parts)-1]
-		if idx := strings.IndexAny(link, "/?#"); idx != -1 {
-			link = link[:idx]
+		rawLinks := strings.Split(*links, ",")
+		if len(rawLinks) == 1 && rawLinks[0] == "" {
+			// -links не задан, используем -link (backward compat)
+			rawLinks = []string{*link}
 		}
-		c.VK.Link = link
+		for _, raw := range rawLinks {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			parts := strings.Split(raw, "join/")
+			normalized := parts[len(parts)-1]
+			if idx := strings.IndexAny(normalized, "/?#"); idx != -1 {
+				normalized = normalized[:idx]
+			}
+			if normalized != "" {
+				c.VK.Links = append(c.VK.Links, normalized)
+			}
+		}
+		if len(c.VK.Links) == 0 {
+			return nil, errors.New("need at least one valid VK link")
+		}
 	default:
 		return nil, fmt.Errorf("invalid -provider value %q: must be %s", c.Provider.Name, ProviderVK)
 	}
