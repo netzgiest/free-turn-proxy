@@ -393,6 +393,7 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 	obfProfile := fs.String("obf-profile", string(ObfProfileNone), "wire-профиль обфускации: none | rtpopus | rtpopus2 | rtpopus3; должен совпадать с клиентом")
 	obfKey := fs.String("obf-key", "", "ключ для -obf-profile != none: 32 байта hex (64 символа)")
 	genObfKey := fs.Bool("gen-obf-key", false, "напечатать новый -obf-key и выйти")
+	obfTiming := fs.Duration("obf-timing", 0, "межпакетная задержка для RTP-мимикрии (напр. 10ms); 0=выкл")
 	debug := fs.Bool("debug", false, "подробные debug-логи")
 	clientsFile := fs.String("clients-file", "", "путь к файлу clients.json для авторизации по Client ID")
 
@@ -404,6 +405,7 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 		Obf: ObfOpts{
 			Profile: ObfProfile(*obfProfile),
 			GenKey:  *genObfKey,
+			Timing:  *obfTiming,
 		},
 		Proxy: ProxyOpts{
 			Mode:    serverProxyMode(*mode),
