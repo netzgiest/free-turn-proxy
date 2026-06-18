@@ -56,6 +56,7 @@ const (
 	ObfProfileNone     ObfProfile = "none"     // обфускация отключена
 	ObfProfileRTPOpus  ObfProfile = "rtpopus"  // RTP/opus + ChaCha20-Poly1305 AEAD
 	ObfProfileRTPOpus2 ObfProfile = "rtpopus2" // rtpopus + RTP header extension (мимикрия под современный WebRTC)
+	ObfProfileRTPOpus3 ObfProfile = "rtpopus3" // rtpopus2 + abs-send-time + VAD + loss simulation + variable ts
 )
 
 // ObfOpts - опции обфускации TURN-payload.
@@ -184,7 +185,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	transport := fs.String("transport", "tcp", "транспорт до TURN-реле: tcp | udp")
 	mode := fs.String("mode", "udp", "режим туннеля: udp (WireGuard) | tcp (Xray/sing-box)")
 	bond := fs.Bool("bond", false, "страйпинг TCP по smux-сессиям; только с -mode tcp")
-	obfProfile := fs.String("obf-profile", string(ObfProfileNone), "wire-профиль обфускации: none | rtpopus | rtpopus2; должен совпадать с сервером")
+	obfProfile := fs.String("obf-profile", string(ObfProfileNone), "wire-профиль обфускации: none | rtpopus | rtpopus2 | rtpopus3; должен совпадать с сервером")
 	obfKey := fs.String("obf-key", "", "ключ для -obf-profile != none: 32 байта hex (64 символа)")
 	genObfKey := fs.Bool("gen-obf-key", false, "напечатать новый -obf-key и выйти")
 	obfTiming := fs.Duration("obf-timing", 0, "межпакетная задержка для RTP-мимикрии (напр. 20ms); 0=выкл")
@@ -389,7 +390,7 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 	listen := fs.String("listen", "0.0.0.0:56000", "локальный адрес прослушивания ip:port")
 	connect := fs.String("connect", "", "локальный бэкенд host:port; обязательно: WG 127.0.0.1:51820 | Xray 127.0.0.1:443")
 	mode := fs.String("mode", "udp", "режим туннеля: udp (WireGuard) | tcp (Xray/sing-box; bond авто)")
-	obfProfile := fs.String("obf-profile", string(ObfProfileNone), "wire-профиль обфускации: none | rtpopus | rtpopus2; должен совпадать с клиентом")
+	obfProfile := fs.String("obf-profile", string(ObfProfileNone), "wire-профиль обфускации: none | rtpopus | rtpopus2 | rtpopus3; должен совпадать с клиентом")
 	obfKey := fs.String("obf-key", "", "ключ для -obf-profile != none: 32 байта hex (64 символа)")
 	genObfKey := fs.Bool("gen-obf-key", false, "напечатать новый -obf-key и выйти")
 	debug := fs.Bool("debug", false, "подробные debug-логи")
@@ -447,10 +448,10 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 // validateObfProfile проверяет что -obf-profile содержит известное значение.
 func validateObfProfile(p ObfProfile) error {
 	switch p {
-	case ObfProfileNone, ObfProfileRTPOpus, ObfProfileRTPOpus2:
+	case ObfProfileNone, ObfProfileRTPOpus, ObfProfileRTPOpus2, ObfProfileRTPOpus3:
 		return nil
 	default:
-		return fmt.Errorf("invalid -obf-profile value %q: must be %s | %s | %s", p, ObfProfileNone, ObfProfileRTPOpus, ObfProfileRTPOpus2)
+		return fmt.Errorf("invalid -obf-profile value %q: must be %s | %s | %s | %s", p, ObfProfileNone, ObfProfileRTPOpus, ObfProfileRTPOpus2, ObfProfileRTPOpus3)
 	}
 }
 
