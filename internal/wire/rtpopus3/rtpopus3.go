@@ -58,9 +58,9 @@ const (
 	rtpPT     = 0x6F                             // M=0, PT=111 (opus)
 	rtpMarker = 0x80                             // M=1
 
-	extAudioLevelHdr   = 0x10 // id=1, len=1
-	extTransportHdr    = 0x21 // id=2, len=2
-	extAbsSendTimeHdr  = 0x32 // id=3, len=2
+	extAudioLevelHdr  = 0x10 // id=1, len=1
+	extTransportHdr   = 0x21 // id=2, len=2
+	extAbsSendTimeHdr = 0x32 // id=3, len=2
 
 	speechMinPkts  = 30
 	speechMaxPkts  = 200

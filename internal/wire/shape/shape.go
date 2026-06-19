@@ -22,15 +22,15 @@ import (
 type JitterModel int
 
 const (
-	JitterUniform   JitterModel = iota // ±rate% от interval (0..2*rate*interval)
-	JitterGaussian                     // гауссово распределение с sigma = rate*interval/3
+	JitterUniform  JitterModel = iota // ±rate% от interval (0..2*rate*interval)
+	JitterGaussian                    // гауссово распределение с sigma = rate*interval/3
 )
 
 // Shaper управляет межпакетной задержкой.
 type Shaper struct {
-	interval time.Duration
-	lastSend time.Time
-	model    JitterModel
+	interval  time.Duration
+	lastSend  time.Time
+	model     JitterModel
 	jitterPct float64 // доля interval для jitter (0.1 = ±10%)
 	burst     int     // осталось пакетов в текущем burst (0 = не в burst)
 	burstMax  int     // макс. пакетов в burst
@@ -161,8 +161,8 @@ func (a *shapedPacketConnAdapter) WriteTo(b []byte, addr net.Addr) (int, error) 
 // shapedPacketListener оборачивает dtlsnet.PacketListener, применяя pacing
 // к WriteTo каждого принятого PacketConn.
 type shapedPacketListener struct {
-	inner   dtlsnet.PacketListener
-	shaper  *Shaper
+	inner  dtlsnet.PacketListener
+	shaper *Shaper
 }
 
 // Accept принимает соединение и оборачивает его ShapedPacketConn.
