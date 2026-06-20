@@ -25,6 +25,9 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
 )
 
+// Сервер VK выдает JS-бандл с версией капчи под конкретное семейство браузеров.
+// Версия автоопределяется из URL скрипта при первой капче.
+
 // Log - пакетный логгер. По умолчанию no-op; main устанавливает его через
 // SetLogger, чтобы captcha-вывод подчинялся глобальному -debug. Solve также
 // принимает logger параметром для DI.
@@ -35,10 +38,11 @@ func SetLogger(l logx.Logger) { Log = logx.OrNop(l) }
 
 const (
 	// TODO: поддерживать версию API актуальной (https://dev.vk.com/ru/reference/versions)
-	captchaAPIVersion    = "5.199"
-	captchaScriptVersion = "1.1.1357"
-	captchaDeviceInfo    = `{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1080,"innerWidth":1920,"innerHeight":951,"devicePixelRatio":1,"language":"en-US","languages":["en-US","en"],"webdriver":false,"hardwareConcurrency":8,"notificationsPermission":"denied"}`
+	captchaAPIVersion = "5.199"
+	captchaDeviceInfo = `{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1080,"innerWidth":1920,"innerHeight":951,"devicePixelRatio":1,"language":"en-US","languages":["en-US","en"],"webdriver":false,"hardwareConcurrency":8,"notificationsPermission":"denied"}`
 )
+
+var captchaScriptVersion string
 
 var (
 	reCaptchaPowInput   = regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
@@ -213,15 +217,22 @@ func (s *captchaSession) solveOnce(captchaErr *Error) (string, error) {
 		browserFP = s.savedProfile.BrowserFp
 	}
 
+	scriptVer := ""
 	if m := reCaptchaVersion.FindStringSubmatch(page.ScriptURL); len(m) > 1 {
-		if m[1] != captchaScriptVersion {
-			s.logger().Warnf("[Captcha] script version drift: known=%s latest=%s", captchaScriptVersion, m[1])
+		scriptVer = m[1]
+		if scriptVer != captchaScriptVersion {
+			if captchaScriptVersion == "" {
+				s.logger().Infof("[Captcha] script version: %s", scriptVer)
+			} else {
+				s.logger().Warnf("[Captcha] script version changed: %s -> %s", captchaScriptVersion, scriptVer)
+			}
+			captchaScriptVersion = scriptVer
 		}
 	}
 
 	debugInfo, err := s.fetchDebugInfo(page.ScriptURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch debug info: %w (script_version=%s)", err, captchaScriptVersion)
+		return "", fmt.Errorf("failed to fetch debug info: %w (script_version=%s)", err, scriptVer)
 	}
 
 	showType := ""
