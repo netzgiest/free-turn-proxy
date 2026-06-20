@@ -5,12 +5,18 @@ import (
 	"errors"
 	"fmt"
 	neturl "net/url"
+	"sync"
 	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/browserprofile"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/captcha"
 
 	tlsclient "github.com/bogdanfinn/tls-client"
+)
+
+var (
+	cachedSuccessToken   string
+	cachedSuccessTokenMu sync.Mutex
 )
 
 // fetchCallToken - шаг 2 цепочки: вызывает calls.getAnonymousToken и ведёт
@@ -25,8 +31,16 @@ func (c *Client) fetchCallToken(
 ) (string, error) {
 	// TODO: поддерживать версию API актуальной (https://dev.vk.com/ru/reference/versions)
 	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.199&client_id=%s", creds.ClientID)
+
+	cachedSuccessTokenMu.Lock()
+	curToken := cachedSuccessToken
+	cachedSuccessTokenMu.Unlock()
+
 	data := fmt.Sprintf("vk_join_link=https://vk.ru/call/join/%s&name=%s&access_token=%s",
 		link, escapedName, token1)
+	if curToken != "" {
+		data += "&success_token=" + neturl.QueryEscape(curToken)
+	}
 
 	for attempt := 0; ; attempt++ {
 		resp, err := c.doRequest(ctx, httpClient, profile, data, urlAddr)
@@ -143,6 +157,13 @@ func (c *Client) solveCaptcha(
 			}
 		}
 		manualCancel()
+	}
+
+	if solveErr == nil && successToken != "" {
+		cachedSuccessTokenMu.Lock()
+		cachedSuccessToken = successToken
+		cachedSuccessTokenMu.Unlock()
+		c.log.Debugf("[STREAM %d] [Captcha] Cached success_token", streamID)
 	}
 
 	if solveErr != nil {
