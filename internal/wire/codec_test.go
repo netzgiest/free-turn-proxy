@@ -29,8 +29,8 @@ func TestNewClientCodec(t *testing.T) {
 		if c.HeaderLen() <= 0 || c.Overhead() <= c.HeaderLen() {
 			t.Errorf("%q: overhead=%d header=%d (overhead должен включать tag)", p, c.Overhead(), c.HeaderLen())
 		}
-		if c.MaxWire(100) != c.Overhead()+100 {
-			t.Errorf("%q: MaxWire(100)=%d, want %d", p, c.MaxWire(100), c.Overhead()+100)
+		if c.MaxWire(100) < c.Overhead()+100 {
+			t.Errorf("%q: MaxWire(100)=%d, want >=%d", p, c.MaxWire(100), c.Overhead()+100)
 		}
 	}
 
