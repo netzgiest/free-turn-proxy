@@ -35,8 +35,8 @@ func TestWrapInPlaceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != overhead+len(payload) {
-		t.Fatalf("wire len = %d, want %d", n, overhead+len(payload))
+	if n < overhead+len(payload) || n > overhead+len(payload)+paddingMax {
+		t.Fatalf("wire len = %d, want [%d, %d]", n, overhead+len(payload), overhead+len(payload)+paddingMax)
 	}
 	plain, err := srv.UnwrapInPlace(buf[:n])
 	if err != nil {
@@ -81,8 +81,8 @@ func TestHeaderShape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if buf[0] != rtpVerExt {
-		t.Errorf("byte0 = 0x%02x, want 0x%02x (V=2, X=1)", buf[0], rtpVerExt)
+	if buf[0]&^byte(rtpPaddingBit) != rtpVerExt {
+		t.Errorf("byte0 = 0x%02x, mask P-bit = 0x%02x, want 0x%02x (V=2, X=1)", buf[0], buf[0]&^byte(rtpPaddingBit), rtpVerExt)
 	}
 	if buf[12] != 0xBE || buf[13] != 0xDE {
 		t.Errorf("ext profile = 0x%02x%02x, want 0xBEDE", buf[12], buf[13])

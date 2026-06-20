@@ -3,7 +3,7 @@
 // Package rtpopus3 - wire-профиль обфускации с улучшенной RTP-мимикрией:
 // три one-byte extension (audio-level, transport-wide-cc, abs-send-time),
 // вариативный шаг timestamp, эмуляция потери пакетов (gaps в seq),
-// VAD-модель с переключением silence/speech.
+// VAD-модель с переключением silence/speech, эмуляция RTP padding.
 //
 // Wire-формат (HeaderLen=40, Overhead=56):
 //
@@ -11,7 +11,7 @@
 //
 // RTP header (RFC 3550):
 //
-//	byte 0:    0x90        V=2, P=0, X=1, CC=0
+//	byte 0:    0x90|0x20   V=2, P=0/1 (padding ~10%), X=1, CC=0
 //	byte 1:    M<<7 | 0x6F M=1 на старте talkspurt, PT=111 (opus)
 //	byte 2-3:  seq16 BE    монотонный с пропусками (loss simulation)
 //	byte 4-7:  ts32 BE     вариативный шаг 480/960/1920 (10/20/40ms)
@@ -31,6 +31,10 @@
 //
 // 12B explicit nonce = 4B sessionID || 8B counter (BE). MSB sessionID
 // кодирует направление. AAD = первые 40 байт (RTP hdr || ext || nonce).
+//
+// RTP padding (RFC 3550 §5.3.1): ~10% пакетов имеют P=1 и 1-4 байта padding
+// в конце payload (до AEAD). Последний байт padding — длина padding'а.
+// Приёмник читает P-бит, после AEAD-расшифровки отрезает padLen последних байт.
 package rtpopus3
 
 import (
@@ -58,6 +62,12 @@ const (
 	rtpPT     = 0x6F                             // M=0, PT=111 (opus)
 	rtpMarker = 0x80                             // M=1
 
+	rtpPaddingBit = 0x20 // P=1 в RTP header (byte 0, bit 5)
+
+	paddingChance = 26   // 26/256 ≈ 10%
+	paddingMin    = 1
+	paddingMax    = 4
+
 	extAudioLevelHdr  = 0x10 // id=1, len=1
 	extTransportHdr   = 0x21 // id=2, len=2
 	extAbsSendTimeHdr = 0x32 // id=3, len=2
@@ -77,7 +87,7 @@ const (
 	tsStep40ms = 1920
 )
 
-func MaxWire(payloadLen int) int { return overhead + payloadLen }
+func MaxWire(payloadLen int) int { return overhead + payloadLen + paddingMax }
 
 type audioState int
 
@@ -164,7 +174,7 @@ func NewConnFromState(state *State, isServer bool) (*Conn, error) {
 
 func (*Conn) HeaderLen() int    { return headerLen }
 func (*Conn) Overhead() int     { return overhead }
-func (*Conn) MaxWire(n int) int { return overhead + n }
+func (*Conn) MaxWire(n int) int { return MaxWire(n) }
 
 func randRange(n int) int {
 	if n <= 0 {
@@ -237,7 +247,7 @@ func (c *Conn) absSendTime() uint32 {
 }
 
 func (c *Conn) WrapInto(dst, payload []byte) (int, error) {
-	if len(dst) < overhead+len(payload) {
+	if len(dst) < c.MaxWire(len(payload)) {
 		return 0, errors.New("rtpopus3:dst buffer too small")
 	}
 	copy(dst[headerLen:], payload)
@@ -245,12 +255,20 @@ func (c *Conn) WrapInto(dst, payload []byte) (int, error) {
 }
 
 func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
-	wireLen := overhead + plainLen
+	padLen := 0
+	if randRange(256) < paddingChance {
+		padLen = paddingMin + randRange(paddingMax-paddingMin+1)
+	}
+
+	wireLen := overhead + plainLen + padLen
 	if len(buf) < wireLen {
 		return 0, errors.New("rtpopus3:dst buffer too small")
 	}
 
 	buf[0] = rtpVerExt
+	if padLen > 0 {
+		buf[0] |= rtpPaddingBit
+	}
 	pt := byte(rtpPT)
 	if c.updateAudioState() && c.audioState == stateSpeech {
 		pt |= rtpMarker
@@ -282,9 +300,18 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	ctr := c.counter.Add(1) - 1
 	binary.BigEndian.PutUint64(buf[32:headerLen], ctr)
 
+	if padLen > 0 {
+		padStart := headerLen + plainLen
+		for i := 0; i < padLen; i++ {
+			buf[padStart+i] = byte(randRange(256))
+		}
+		buf[padStart+padLen-1] = byte(padLen)
+	}
+
 	nonce := buf[28:headerLen]
 	aad := buf[:headerLen]
-	c.state.aead.Seal(buf[headerLen:headerLen], nonce, buf[headerLen:headerLen+plainLen], aad)
+	plainEnd := headerLen + plainLen + padLen
+	c.state.aead.Seal(buf[headerLen:headerLen], nonce, buf[headerLen:plainEnd], aad)
 	return wireLen, nil
 }
 
@@ -312,6 +339,14 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rtpopus3:AEAD open: %w", err)
 	}
+
+	if len(wire) > 0 && (wire[0]&rtpPaddingBit) != 0 && len(plain) > 0 {
+		padLen := int(plain[len(plain)-1])
+		if padLen > 0 && padLen < len(plain) {
+			plain = plain[:len(plain)-padLen]
+		}
+	}
+
 	return plain, nil
 }
 
