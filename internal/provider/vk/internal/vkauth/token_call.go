@@ -23,7 +23,8 @@ func (c *Client) fetchCallToken(
 	link, escapedName, token1 string,
 	creds VKCredentials,
 ) (string, error) {
-	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=%s", creds.ClientID)
+	// TODO: поддерживать версию API актуальной (https://dev.vk.com/ru/reference/versions)
+	urlAddr := fmt.Sprintf("https://api.vk.ru/method/calls.getAnonymousToken?v=5.199&client_id=%s", creds.ClientID)
 	data := fmt.Sprintf("vk_join_link=https://vk.ru/call/join/%s&name=%s&access_token=%s",
 		link, escapedName, token1)
 

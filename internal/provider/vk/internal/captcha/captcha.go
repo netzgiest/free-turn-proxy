@@ -34,7 +34,8 @@ var Log logx.Logger = logx.Nop()
 func SetLogger(l logx.Logger) { Log = logx.OrNop(l) }
 
 const (
-	captchaAPIVersion    = "5.131"
+	// TODO: поддерживать версию API актуальной (https://dev.vk.com/ru/reference/versions)
+	captchaAPIVersion    = "5.199"
 	captchaScriptVersion = "1.1.1357"
 	captchaDeviceInfo    = `{"screenWidth":1920,"screenHeight":1080,"screenAvailWidth":1920,"screenAvailHeight":1080,"innerWidth":1920,"innerHeight":951,"devicePixelRatio":1,"language":"en-US","languages":["en-US","en"],"webdriver":false,"hardwareConcurrency":8,"notificationsPermission":"denied"}`
 )
