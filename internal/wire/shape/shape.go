@@ -146,35 +146,19 @@ func (s *ShapedPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	return s.PacketConn.WriteTo(b, addr)
 }
 
-// shapedPacketConnAdapter адаптирует PacketConn с shaping-ом для
-// использования в качестве возвращаемого значения dtlsnet.PacketListener.Accept().
-type shapedPacketConnAdapter struct {
-	net.PacketConn
-	writeShaper *Shaper
-}
-
-func (a *shapedPacketConnAdapter) WriteTo(b []byte, addr net.Addr) (int, error) {
-	a.writeShaper.Wait()
-	return a.PacketConn.WriteTo(b, addr)
-}
-
 // shapedPacketListener оборачивает dtlsnet.PacketListener, применяя pacing
 // к WriteTo каждого принятого PacketConn.
 type shapedPacketListener struct {
-	inner  dtlsnet.PacketListener
-	shaper *Shaper
+	inner    dtlsnet.PacketListener
+	interval time.Duration
 }
 
-// Accept принимает соединение и оборачивает его ShapedPacketConn.
 func (l *shapedPacketListener) Accept() (net.PacketConn, net.Addr, error) {
 	pc, addr, err := l.inner.Accept()
 	if err != nil {
 		return pc, addr, err
 	}
-	return &shapedPacketConnAdapter{
-		PacketConn:  pc,
-		writeShaper: New(l.shaper.interval),
-	}, addr, nil
+	return &ShapedPacketConn{PacketConn: pc, shaper: New(l.interval)}, addr, nil
 }
 
 func (l *shapedPacketListener) Close() error   { return l.inner.Close() }
@@ -187,8 +171,5 @@ func WrapPacketListener(l dtlsnet.PacketListener, interval time.Duration) dtlsne
 	if interval <= 0 {
 		return l
 	}
-	return &shapedPacketListener{
-		inner:  l,
-		shaper: New(interval),
-	}
+	return &shapedPacketListener{inner: l, interval: interval}
 }
