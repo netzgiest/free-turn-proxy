@@ -161,8 +161,8 @@ func (l *shapedPacketListener) Accept() (net.PacketConn, net.Addr, error) {
 	return &ShapedPacketConn{PacketConn: pc, shaper: New(l.interval)}, addr, nil
 }
 
-func (l *shapedPacketListener) Close() error   { return l.inner.Close() }
-func (l *shapedPacketListener) Addr() net.Addr { return l.inner.Addr() }
+func (l *shapedPacketListener) Close() error                   { return l.inner.Close() }
+func (l *shapedPacketListener) Addr() net.Addr                 { return l.inner.Addr() }
 func (l *shapedPacketListener) Unwrap() dtlsnet.PacketListener { return l.inner }
 
 // WrapPacketListener оборачивает dtlsnet.PacketListener, добавляя pacing
