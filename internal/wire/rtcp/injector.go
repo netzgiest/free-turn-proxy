@@ -1,0 +1,113 @@
+package rtcp
+
+import (
+	"encoding/binary"
+	"math/rand"
+	"net"
+	"sync/atomic"
+	"time"
+)
+
+const (
+	rtcpIntervalMin = 500 * time.Millisecond
+	rtcpIntervalMax = 5 * time.Second
+)
+
+// Injector оборачивает net.PacketConn и периодически (каждые 0.5-5s)
+// инжектит compound RTCP (SR+SDES) в поток, используя RTP-заголовки
+// проходящих data-пакетов для актуализации статистики.
+//
+// VK DPI видит RTCP-пакеты рядом с RTP → неотличимо от real WebRTC.
+// Никак не влияет на rtpopus/rtpopus2/rtpopus3 — работает поверх OBF-слоя.
+type Injector struct {
+	inner net.PacketConn
+	peer  net.Addr
+	cname []byte
+
+	startTime time.Time
+	lastRTCP  atomic.Int64 // unix nanos
+
+	// парсинг RTP-заголовков проходящих пакетов
+	ssrc     uint32
+	rtpTS    uint32
+	pktCount uint32
+	octCount uint64
+
+	// следующий интервал до RTCP (случайный)
+	nextInterval atomic.Int64 // nanos
+}
+
+// Wrap создаёт Injector, оборачивающий conn. peer — адрес TURN-пира.
+// injector перехватывает WriteTo, обновляет статистику и периодически
+// добавляет RTCP-пакеты перед data-пакетами.
+func Wrap(conn net.PacketConn, peer net.Addr) *Injector {
+	inj := &Injector{
+		inner:     conn,
+		peer:      peer,
+		cname:     GenerateCNAME(),
+		startTime: time.Now(),
+	}
+	inj.lastRTCP.Store(time.Now().UnixNano())
+	inj.nextInterval.Store(int64(rtcpIntervalMin) + rand.Int63n(int64(rtcpIntervalMax-rtcpIntervalMin)))
+	return inj
+}
+
+// WriteTo перехватывает запись в relay, обновляет статистику из RTP-заголовка
+// OBF-запакованного пакета и инжектит RTCP, если подошёл интервал.
+func (w *Injector) WriteTo(b []byte, addr net.Addr) (int, error) {
+	// Парсим SSRC и RTP timestamp из OBF-заголовка.
+	// RTP header всегда в начале OBF-пакета: V=2, P, X, CC, M, PT, seq, ts, SSRC.
+	if len(b) >= 12 && (b[0]&0xC0) == 0x80 { // V=2
+		w.ssrc = binary.BigEndian.Uint32(b[8:12])
+		w.rtpTS = binary.BigEndian.Uint32(b[4:8])
+		w.pktCount++
+		w.octCount += uint64(len(b) - 56) // estimate payload (OBF v3 overhead)
+	}
+
+	// Проверяем, не пора ли отправить RTCP.
+	now := time.Now()
+	if now.Sub(time.Unix(0, w.lastRTCP.Load())) >= time.Duration(w.nextInterval.Load()) {
+		w.inject(now)
+	}
+
+	return w.inner.WriteTo(b, w.peer)
+}
+
+func (w *Injector) inject(now time.Time) {
+	w.lastRTCP.Store(now.UnixNano())
+	w.nextInterval.Store(int64(rtcpIntervalMin) + rand.Int63n(int64(rtcpIntervalMax-rtcpIntervalMin)))
+
+	oct := uint32(w.octCount)
+	if oct > w.pktCount*1500 {
+		oct = w.pktCount * 500 // clamp to reasonable estimate
+	}
+
+	sdesCname := w.cname
+	if len(sdesCname) == 0 {
+		sdesCname = []byte("rtc@webrtc")
+	}
+
+	pkt := BuildCompoundSR(w.ssrc, w.rtpTS, w.pktCount, oct, sdesCname)
+	if len(pkt) > 0 {
+		// Игнорируем ошибку записи RTCP — пакет не критичен.
+		_, _ = w.inner.WriteTo(pkt, w.peer)
+	}
+}
+
+// ReadFrom пробрасывает чтение без изменений.
+func (w *Injector) ReadFrom(b []byte) (int, net.Addr, error) { return w.inner.ReadFrom(b) }
+
+// Close закрывает внутреннее соединение.
+func (w *Injector) Close() error { return w.inner.Close() }
+
+// LocalAddr возвращает локальный адрес.
+func (w *Injector) LocalAddr() net.Addr { return w.inner.LocalAddr() }
+
+// SetDeadline пробрасывает дедлайн.
+func (w *Injector) SetDeadline(t time.Time) error { return w.inner.SetDeadline(t) }
+
+// SetReadDeadline пробрасывает read-дедлайн.
+func (w *Injector) SetReadDeadline(t time.Time) error { return w.inner.SetReadDeadline(t) }
+
+// SetWriteDeadline пробрасывает write-дедлайн.
+func (w *Injector) SetWriteDeadline(t time.Time) error { return w.inner.SetWriteDeadline(t) }

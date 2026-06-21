@@ -15,6 +15,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/common"
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
 	"github.com/samosvalishe/free-turn-proxy/internal/stats"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtcp"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/shape"
 )
 
@@ -240,6 +241,15 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 	if params.ObfTiming > 0 {
 		relayConn = shape.WrapPacketConn(relayConn, params.ObfTiming)
 		deps.log().Debugf("[STREAM %d] obf-timing=%s", streamID, params.ObfTiming)
+	}
+
+	// RTCP-инжектор: шлёт compound RTCP (SR+SDES) рядом с OBF-пакетами,
+	// имитируя настоящий WebRTC-поток. Только для rtpopus3 — серверная сторона
+	// должна уметь пропускать RTCP-пакеты (rtpopus3/listen.go обрабатывает это).
+	// rtpopus/rtpopus2 не поддерживают RTCP-инжекцию на серверной стороне.
+	if params.Profile == "rtpopus3" {
+		relayConn = rtcp.Wrap(relayConn, peer)
+		deps.log().Debugf("[STREAM %d] rtcp-injector enabled", streamID)
 	}
 
 	// Инкремент до ResetErrors - конкурентные наблюдатели HandleAuthError видят

@@ -11,6 +11,8 @@ import (
 	pionudp "github.com/pion/transport/v4/udp"
 )
 
+const maxRTCPAttempts = 256
+
 var bufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, 1600+overhead)
@@ -53,13 +55,23 @@ func (l *packetListener) Accept() (net.PacketConn, net.Addr, error) {
 func (l *packetListener) Close() error   { return l.inner.Close() }
 func (l *packetListener) Addr() net.Addr { return l.inner.Addr() }
 
+// isRTCP проверяет, является ли пакет RTCP (SR/RR/SDES/BYE) по стандартному
+// RTP/RTCP demux (RFC 5761 §4): V=2 и PT ∈ [200, 207].
+func isRTCP(b []byte) bool {
+	return len(b) >= 8 && (b[0]&0xC0) == 0x80 && b[1] >= 200 && b[1] <= 207
+}
+
 type packetConn struct {
 	inner net.PacketConn
 	conn  *Conn
 }
 
 func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	bp := bufPool.Get().(*[]byte)
+	bpAny := bufPool.Get()
+	bp, ok := bpAny.(*[]byte)
+	if !ok {
+		return 0, nil, errors.New("rtpopus3:bad bufPool type")
+	}
 	buf := *bp
 	need := len(p) + overhead
 	if cap(buf) < need {
@@ -68,25 +80,39 @@ func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 	defer bufPool.Put(bp)
 
-	n, addr, err := c.inner.ReadFrom(buf[:cap(buf)])
-	if err != nil {
-		return 0, addr, err
+	for attempt := 0; attempt < maxRTCPAttempts; attempt++ {
+		n, addr, err := c.inner.ReadFrom(buf[:cap(buf)])
+		if err != nil {
+			return 0, addr, err
+		}
+		wire := buf[:n]
+
+		// RTCP-пакеты (инжектированные клиентом) не являются OBF;
+		// пропускаем их — они не предназначены DTLS-слою.
+		if isRTCP(wire) {
+			continue
+		}
+
+		if len(wire) < overhead {
+			return 0, addr, errors.New("rtpopus3:packet too short")
+		}
+		m, err := c.conn.Unwrap(wire, p)
+		if err != nil {
+			return 0, addr, err
+		}
+		return m, addr, nil
 	}
-	wire := buf[:n]
-	if len(wire) < overhead {
-		return 0, addr, errors.New("rtpopus3:packet too short")
-	}
-	m, err := c.conn.Unwrap(wire, p)
-	if err != nil {
-		return 0, addr, err
-	}
-	return m, addr, nil
+	return 0, nil, errors.New("rtpopus3:too many non-OBF packets (RTCP flood?)")
 }
 
 func (c *packetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	wireLen := overhead + len(p)
 
-	bp := bufPool.Get().(*[]byte)
+	bpAny := bufPool.Get()
+	bp, ok := bpAny.(*[]byte)
+	if !ok {
+		return 0, errors.New("rtpopus3:bad bufPool type")
+	}
 	out := *bp
 	if cap(out) < wireLen {
 		out = make([]byte, wireLen)
