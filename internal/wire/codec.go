@@ -59,6 +59,7 @@ func NewClientCodec(profile string, key []byte) (Codec, error) {
 // Listen строит серверный PacketListener, AEAD-разворачивающий каждый принятый
 // PacketConn по профилю. Зовётся только при включённой обфускации.
 // serverTiming добавляет pacing на отправку от сервера к клиенту (0 = без pacing).
+// logf — опциональный колбэк для отладки VAD/видео (только rtpopus3).
 func Listen(profile string, addr *net.UDPAddr, key []byte, serverTiming ...time.Duration) (dtlsnet.PacketListener, error) {
 	var timing time.Duration
 	if len(serverTiming) > 0 {
@@ -81,4 +82,20 @@ func Listen(profile string, addr *net.UDPAddr, key []byte, serverTiming ...time.
 		return nil, err
 	}
 	return shape.WrapPacketListener(listener, timing), nil
+}
+
+// SetLogfListener пробрасывает Logf в нижележащий rtpopus3-листенер сквозь
+// shape-обёртку. Для других профилей — no-op.
+func SetLogfListener(l dtlsnet.PacketListener, logf rtpopus3.Logf) {
+	for {
+		if pl, ok := l.(*rtpopus3.Listener); ok {
+			pl.SetLogf(logf)
+			return
+		}
+		ul, ok := l.(interface{ Unwrap() dtlsnet.PacketListener })
+		if !ok {
+			return
+		}
+		l = ul.Unwrap()
+	}
 }

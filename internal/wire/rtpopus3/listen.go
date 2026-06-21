@@ -15,7 +15,7 @@ const maxRTCPAttempts = 256
 
 var bufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 1600+overhead)
+		b := make([]byte, MaxWire(1600))
 		return &b
 	},
 }
@@ -29,18 +29,22 @@ func Listen(addr *net.UDPAddr, key []byte) (dtlsnet.PacketListener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rtpopus3:udp listen: %w", err)
 	}
-	return &packetListener{
+	return &Listener{
 		inner: dtlsnet.PacketListenerFromListener(inner),
 		state: state,
 	}, nil
 }
 
-type packetListener struct {
+// Listener — серверный dtlsnet.PacketListener с распаковкой rtpopus3.
+type Listener struct {
 	inner dtlsnet.PacketListener
 	state *State
+	logf  Logf
 }
 
-func (l *packetListener) Accept() (net.PacketConn, net.Addr, error) {
+func (l *Listener) SetLogf(logf Logf) { l.logf = logf }
+
+func (l *Listener) Accept() (net.PacketConn, net.Addr, error) {
 	pc, addr, err := l.inner.Accept()
 	if err != nil {
 		return pc, addr, err
@@ -49,11 +53,14 @@ func (l *packetListener) Accept() (net.PacketConn, net.Addr, error) {
 	if err != nil {
 		return nil, addr, err
 	}
+	if l.logf != nil {
+		conn.SetLogf(l.logf)
+	}
 	return &packetConn{inner: pc, conn: conn}, addr, nil
 }
 
-func (l *packetListener) Close() error   { return l.inner.Close() }
-func (l *packetListener) Addr() net.Addr { return l.inner.Addr() }
+func (l *Listener) Close() error   { return l.inner.Close() }
+func (l *Listener) Addr() net.Addr { return l.inner.Addr() }
 
 // isRTCP проверяет, является ли пакет RTCP (SR/RR/SDES/BYE) по стандартному
 // RTP/RTCP demux (RFC 5761 §4): V=2 и PT ∈ [200, 207].
@@ -106,7 +113,7 @@ func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 func (c *packetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	wireLen := overhead + len(p)
+	wireLen := c.conn.MaxWire(len(p))
 
 	bpAny := bufPool.Get()
 	bp, ok := bpAny.(*[]byte)

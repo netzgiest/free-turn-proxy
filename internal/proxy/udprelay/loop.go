@@ -16,6 +16,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
 	"github.com/samosvalishe/free-turn-proxy/internal/stats"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtcp"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus3"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/shape"
 )
 
@@ -248,7 +249,11 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 	// должна уметь пропускать RTCP-пакеты (rtpopus3/listen.go обрабатывает это).
 	// rtpopus/rtpopus2 не поддерживают RTCP-инжекцию на серверной стороне.
 	if params.Profile == "rtpopus3" {
-		relayConn = rtcp.Wrap(relayConn, peer)
+		inj := rtcp.Wrap(relayConn, peer)
+		inj.SetLogf(func(format string, args ...any) {
+			deps.log().Debugf("[STREAM %d][rtcp] "+format, append([]any{streamID}, args...)...)
+		})
+		relayConn = inj
 		deps.log().Debugf("[STREAM %d] rtcp-injector enabled", streamID)
 	}
 
@@ -282,6 +287,11 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 		deps.log().Errorf("[STREAM %d] OBF init failed: %v", streamID, obfErr)
 		turncancel()
 		return
+	}
+	if c, ok := obfConn.(*rtpopus3.Conn); ok {
+		c.SetLogf(func(format string, args ...any) {
+			deps.log().Debugf("[STREAM %d][rtpopus3] "+format, append([]any{streamID}, args...)...)
+		})
 	}
 
 	const maxPayload = 1600

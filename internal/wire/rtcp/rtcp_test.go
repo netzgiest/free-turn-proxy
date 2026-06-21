@@ -94,7 +94,7 @@ func TestGenerateCNAME(t *testing.T) {
 		t.Errorf("CNAME length = %d, want 12", len(c))
 	}
 	for _, ch := range string(c) {
-		if !((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_') {
+		if (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' && ch != '_' {
 			t.Errorf("CNAME contains invalid char %c (base64 url-safe)", ch)
 		}
 	}

@@ -163,6 +163,7 @@ func (l *shapedPacketListener) Accept() (net.PacketConn, net.Addr, error) {
 
 func (l *shapedPacketListener) Close() error   { return l.inner.Close() }
 func (l *shapedPacketListener) Addr() net.Addr { return l.inner.Addr() }
+func (l *shapedPacketListener) Unwrap() dtlsnet.PacketListener { return l.inner }
 
 // WrapPacketListener оборачивает dtlsnet.PacketListener, добавляя pacing
 // к WriteTo каждого принятого PacketConn (server-side shaping).

@@ -116,6 +116,9 @@ type State struct {
 	aead cipher.AEAD
 }
 
+// Logf — опциональный колбэк для отладочного логирования фаз VAD и видео.
+type Logf func(format string, args ...any)
+
 func NewState(key []byte) (*State, error) {
 	if len(key) != KeyLen {
 		return nil, fmt.Errorf("rtpopus3:key must be %d bytes (got %d)", KeyLen, len(key))
@@ -150,6 +153,8 @@ type Conn struct {
 	nextVideoBurst uint64
 	videoBurstRem  int
 	videoInterval  int
+
+	log Logf
 }
 
 func NewConn(key []byte, isServer bool) (*Conn, error) {
@@ -214,6 +219,9 @@ func NewConnFromState(state *State, isServer bool) (*Conn, error) {
 func (*Conn) HeaderLen() int    { return headerLen }
 func (*Conn) Overhead() int     { return overhead }
 func (*Conn) MaxWire(n int) int { return MaxWire(n) }
+
+// SetLogf устанавливает колбэк для отладочного логирования.
+func (c *Conn) SetLogf(logf Logf) { c.log = logf }
 
 func (c *Conn) SetVideoInterval(packets int) {
 	if packets < 1 {
@@ -282,17 +290,25 @@ func (c *Conn) updateAudioState() bool {
 	if c.audioState == stateSilence {
 		c.audioState = stateSpeech
 		c.nextStateSwitch = randPareto(speechMinPkts, speechShape)
+		if c.log != nil {
+			c.log("[VAD] разговор (speech) на ~%d пакетов", c.nextStateSwitch)
+		}
 		c.pktsInState = 0
 		return true
 	}
-	c.audioState = stateSilence
+	var dur int
 	if randRange(256) < silenceTurnChance {
-		c.nextStateSwitch = randExponential(silenceTurnMean)
+		dur = randExponential(silenceTurnMean)
 	} else {
-		c.nextStateSwitch = randExponential(silenceMeanPkts)
+		dur = randExponential(silenceMeanPkts)
 	}
+	c.audioState = stateSilence
+	c.nextStateSwitch = dur
 	if c.nextStateSwitch < 1 {
 		c.nextStateSwitch = 1
+	}
+	if c.log != nil {
+		c.log("[VAD] молчание (silence) на ~%d пакетов", c.nextStateSwitch)
 	}
 	c.pktsInState = 0
 	return false
@@ -345,6 +361,9 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 
 	// Abort video burst early if user stopped talking
 	if c.videoBurstRem > 0 && !isSpeech {
+		if c.log != nil {
+			c.log("[VIDEO] burst прерван — переход в молчание (оставалось %d)", c.videoBurstRem)
+		}
 		c.videoBurstRem = 0
 	}
 
@@ -361,12 +380,18 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 		if c.videoInterval > videoIntervalMax {
 			c.videoInterval = videoIntervalMax
 		}
+		if c.log != nil {
+			c.log("[VIDEO] burst START — %d пакетов, след. burst через ~%d пакетов", burst, c.videoInterval)
+		}
 	}
 
 	// --- Decide if THIS packet is video (only ~33% of burst, rest stays audio) ---
 	isVideo := c.videoBurstRem > 0 && randRange(256) < videoChance
 	if isVideo {
 		c.videoBurstRem--
+		if c.log != nil && c.videoBurstRem == 0 {
+			c.log("[VIDEO] burst END")
+		}
 	}
 
 	// --- Compute plaintext sizes ---

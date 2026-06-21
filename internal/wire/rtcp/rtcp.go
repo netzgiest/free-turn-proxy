@@ -11,9 +11,6 @@ import (
 )
 
 const (
-	ptSR   = 200
-	ptSDES = 202
-
 	sdesCNAME = 1
 )
 
@@ -21,7 +18,7 @@ const (
 func ntpTime(t time.Time) (uint32, uint32) {
 	sec := t.Unix() + 2208988800 // 1900 epoch offset
 	frac := uint32(math.Floor(float64(t.Nanosecond()) * 4.294967296e-6))
-	return uint32(sec), frac
+	return uint32(sec), frac //nolint:gosec // NTP seconds fit in uint32 until 2036
 }
 
 // BuildCompoundSR собирает compound RTCP-пакет: Sender Report + SDES CNAME.
@@ -68,12 +65,12 @@ func BuildCompoundSR(ssrc uint32, rtpTS uint32, pktCount, octCount uint32, cname
 
 	// ---- SDES (PT=202) ----
 	sdesOff := 28
-	binary.BigEndian.PutUint32(buf[sdesOff:sdesOff+4], 0x81CA0000|uint32(sdesLenWords-1)) // V=2, SC=1, PT=202
+	binary.BigEndian.PutUint32(buf[sdesOff:sdesOff+4], 0x81CA0000|uint32(sdesLenWords-1)) //nolint:gosec // sdesLenWords fits uint32
 	binary.BigEndian.PutUint32(buf[sdesOff+4:sdesOff+8], ssrc)
 
 	itemOff := sdesOff + 8
 	buf[itemOff] = sdesCNAME
-	buf[itemOff+1] = byte(len(cname))
+	buf[itemOff+1] = byte(len(cname)) //nolint:gosec // len(cname) <= 255
 	copy(buf[itemOff+2:], cname)
 
 	return buf

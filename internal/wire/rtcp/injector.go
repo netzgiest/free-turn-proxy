@@ -1,16 +1,17 @@
 package rtcp
 
 import (
+	"crypto/rand"
 	"encoding/binary"
-	"math/rand"
+	"math/big"
 	"net"
 	"sync/atomic"
 	"time"
 )
 
 const (
-	rtcpIntervalMin = 500 * time.Millisecond
-	rtcpIntervalMax = 5 * time.Second
+	rtcpIntervalBase = 500 * time.Millisecond
+	rtcpIntervalMax  = 5 * time.Second
 )
 
 // Injector оборачивает net.PacketConn и периодически (каждые 0.5-5s)
@@ -35,7 +36,21 @@ type Injector struct {
 
 	// следующий интервал до RTCP (случайный)
 	nextInterval atomic.Int64 // nanos
+
+	logf func(format string, args ...any)
 }
+
+// rtcpRandInterval возвращает случайный интервал [rtcpIntervalBase, rtcpIntervalMax].
+func rtcpRandInterval() int64 {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(rtcpIntervalMax-rtcpIntervalBase)))
+	if err != nil {
+		return int64(rtcpIntervalBase)
+	}
+	return int64(rtcpIntervalBase) + n.Int64()
+}
+
+// SetLogf устанавливает колбэк для отладочного логирования инжекции.
+func (w *Injector) SetLogf(logf func(format string, args ...any)) { w.logf = logf }
 
 // Wrap создаёт Injector, оборачивающий conn. peer — адрес TURN-пира.
 // injector перехватывает WriteTo, обновляет статистику и периодически
@@ -48,20 +63,20 @@ func Wrap(conn net.PacketConn, peer net.Addr) *Injector {
 		startTime: time.Now(),
 	}
 	inj.lastRTCP.Store(time.Now().UnixNano())
-	inj.nextInterval.Store(int64(rtcpIntervalMin) + rand.Int63n(int64(rtcpIntervalMax-rtcpIntervalMin)))
+	inj.nextInterval.Store(rtcpRandInterval())
 	return inj
 }
 
 // WriteTo перехватывает запись в relay, обновляет статистику из RTP-заголовка
 // OBF-запакованного пакета и инжектит RTCP, если подошёл интервал.
-func (w *Injector) WriteTo(b []byte, addr net.Addr) (int, error) {
+func (w *Injector) WriteTo(b []byte, _ net.Addr) (int, error) {
 	// Парсим SSRC и RTP timestamp из OBF-заголовка.
 	// RTP header всегда в начале OBF-пакета: V=2, P, X, CC, M, PT, seq, ts, SSRC.
 	if len(b) >= 12 && (b[0]&0xC0) == 0x80 { // V=2
 		w.ssrc = binary.BigEndian.Uint32(b[8:12])
 		w.rtpTS = binary.BigEndian.Uint32(b[4:8])
 		w.pktCount++
-		w.octCount += uint64(len(b) - 56) // estimate payload (OBF v3 overhead)
+		w.octCount += uint64(len(b) - 56) //nolint:gosec // payload estimate, safe range
 	}
 
 	// Проверяем, не пора ли отправить RTCP.
@@ -75,11 +90,11 @@ func (w *Injector) WriteTo(b []byte, addr net.Addr) (int, error) {
 
 func (w *Injector) inject(now time.Time) {
 	w.lastRTCP.Store(now.UnixNano())
-	w.nextInterval.Store(int64(rtcpIntervalMin) + rand.Int63n(int64(rtcpIntervalMax-rtcpIntervalMin)))
+	w.nextInterval.Store(rtcpRandInterval())
 
-	oct := uint32(w.octCount)
+	oct := uint32(w.octCount) //nolint:gosec // octCount tracked per-stream, fits uint32
 	if oct > w.pktCount*1500 {
-		oct = w.pktCount * 500 // clamp to reasonable estimate
+		oct = w.pktCount * 500
 	}
 
 	sdesCname := w.cname
@@ -87,9 +102,13 @@ func (w *Injector) inject(now time.Time) {
 		sdesCname = []byte("rtc@webrtc")
 	}
 
+	if w.logf != nil {
+		w.logf("[RTCP] inject SR+SDES (pkt=%d oct=%d cname=%s next=%v)",
+			w.pktCount, oct, sdesCname, time.Duration(w.nextInterval.Load()))
+	}
+
 	pkt := BuildCompoundSR(w.ssrc, w.rtpTS, w.pktCount, oct, sdesCname)
 	if len(pkt) > 0 {
-		// Игнорируем ошибку записи RTCP — пакет не критичен.
 		_, _ = w.inner.WriteTo(pkt, w.peer)
 	}
 }

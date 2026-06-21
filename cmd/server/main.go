@@ -104,6 +104,9 @@ func main() {
 			logger.Errorf("obf listen: %v", oerr)
 			os.Exit(1)
 		}
+		wire.SetLogfListener(obfListener, func(format string, args ...any) {
+			logger.Debugf("[rtpopus3] "+format, args...)
+		})
 		listener, err = dtls.NewListenerWithOptions(obfListener, dtlsOpts...)
 	} else {
 		listener, err = dtls.ListenWithOptions("udp", addr, dtlsOpts...)
