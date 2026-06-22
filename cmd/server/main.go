@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,6 +26,7 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/tcpfwdserver"
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/udpserver"
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/dtlsdial"
+	"github.com/samosvalishe/free-turn-proxy/internal/uri"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus"
 )
@@ -137,6 +143,8 @@ func main() {
 		logger.Infof("Client ID authorization enabled via %s", cfg.ClientsFile)
 	}
 
+	printShareLink(cfg, logger)
+
 	var wg sync.WaitGroup
 	for {
 		select {
@@ -158,6 +166,91 @@ func main() {
 			handleAccepted(ctx, logger, registry, db, conn, cfg)
 		})
 	}
+}
+
+func printShareLink(cfg *config.Server, logger logx.Logger) {
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		logger.Errorf("generate share client-id: %v", err)
+		return
+	}
+	clientID := hex.EncodeToString(idBytes)
+
+	mode := "udp"
+	if cfg.Proxy.Mode == config.ProxyModeTCPFwd || cfg.Proxy.Mode == config.ProxyModeTCPFwdBond {
+		mode = "tcp"
+	}
+
+	obfProfile := ""
+	obfKey := ""
+	if cfg.Obf.Enabled() {
+		obfProfile = string(cfg.Obf.Profile)
+		obfKey = hex.EncodeToString(cfg.Obf.Key)
+	}
+
+	host, port, err := net.SplitHostPort(cfg.Proxy.Listen)
+	if err != nil {
+		logger.Errorf("parse listen addr: %v", err)
+		return
+	}
+	if host == "0.0.0.0" || host == "::" || host == "" {
+		host = detectPublicIP()
+		if host == "" {
+			logger.Errorf("detect public IP: no suitable address found")
+			return
+		}
+	}
+	peer := net.JoinHostPort(host, port)
+
+	u := &uri.Config{
+		Version:        1,
+		Provider:       "vk",
+		Peer:           peer,
+		Transport:      "tcp",
+		Mode:           mode,
+		ObfProfile:     obfProfile,
+		ObfKey:         obfKey,
+		N:              10,
+		StreamsPerCred: 10,
+		ClientID:       clientID,
+		Listen:         "127.0.0.1:9000",
+		DNSMode:        "auto",
+	}
+
+	logger.Infof("Share link: %s", u.String())
+	logger.Infof("Add client to allowlist: %s clients add %s", os.Args[0], clientID)
+}
+
+func detectPublicIP() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://ifconfig.me", nil)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err == nil {
+		defer func() { _ = resp.Body.Close() }()
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			if ip := net.ParseIP(strings.TrimSpace(string(body))); ip != nil && ip.To4() != nil {
+				return ip.String()
+			}
+		}
+	}
+
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() || ipnet.IP.IsUnspecified() {
+			continue
+		}
+		if ip := ipnet.IP.To4(); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func handleAccepted(ctx context.Context, logger logx.Logger, registry *bondserver.Registry, db *clientsdb.DB, conn net.Conn, cfg *config.Server) {

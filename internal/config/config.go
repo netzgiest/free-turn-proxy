@@ -438,6 +438,7 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 	if s.Proxy.Connect == "" {
 		return nil, fmt.Errorf("server address is required")
 	}
+
 	if err := validateObfProfile(s.Obf.Profile); err != nil {
 		return nil, err
 	}
