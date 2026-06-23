@@ -9,10 +9,12 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -144,6 +146,132 @@ type Server struct {
 	Log         LogOpts
 	KCP         KCPOpts
 	ClientsFile string // -clients-file
+}
+
+// ServerFileConfig — JSON-структура файла конфигурации сервера (-config).
+type ServerFileConfig struct {
+	Listen     string `json:"listen"`
+	Connect    string `json:"connect"`
+	Mode       string `json:"mode"`
+	ObfProfile string `json:"obf_profile"`
+	ObfKey     string `json:"obf_key"`
+	ObfTiming  string `json:"obf_timing"`
+	Debug      bool   `json:"debug"`
+}
+
+// DefaultConfigTemplate returns the default config file content.
+func DefaultConfigTemplate() string { return defaultConfigTemplate }
+
+var defaultConfigTemplate = `{
+  "listen": "0.0.0.0:56000",
+  "connect": "",
+  "mode": "udp",
+  "obf_profile": "none",
+  "obf_key": "",
+  "obf_timing": "",
+  "debug": false
+}
+`
+
+// ParseServerConfigFile читает JSON-файл по пути path и возвращает Server.
+func ParseServerConfigFile(path string) (*Server, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if writeErr := os.WriteFile(path, []byte(defaultConfigTemplate), 0o600); writeErr != nil {
+				return nil, fmt.Errorf("config file %s not found and failed to create: %w", path, writeErr)
+			}
+			return nil, fmt.Errorf("config file %s created. Edit it (set \"connect\") and re-run", path)
+		}
+		return nil, fmt.Errorf("config file: %w", err)
+	}
+
+	var fcfg ServerFileConfig
+	if jsonErr := json.Unmarshal(data, &fcfg); jsonErr != nil {
+		return nil, fmt.Errorf("config file: %w", jsonErr)
+	}
+
+	mode := fcfg.Mode
+	if mode == "" {
+		mode = "udp"
+	}
+	switch mode {
+	case "udp", "tcp":
+	default:
+		return nil, fmt.Errorf("config file: invalid mode %q: must be udp | tcp", fcfg.Mode)
+	}
+
+	listen := fcfg.Listen
+	if listen == "" {
+		listen = "0.0.0.0:56000"
+	}
+
+	obfProfile := fcfg.ObfProfile
+	if obfProfile == "" {
+		obfProfile = string(ObfProfileNone)
+	}
+
+	if fcfg.Connect == "" {
+		return nil, fmt.Errorf("config file: connect is required")
+	}
+
+	s := &Server{
+		Obf: ObfOpts{
+			Profile: ObfProfile(obfProfile),
+		},
+		Proxy: ProxyOpts{
+			Mode:    serverProxyMode(mode),
+			Listen:  listen,
+			Connect: fcfg.Connect,
+		},
+		Log: LogOpts{
+			Debug: fcfg.Debug,
+		},
+		KCP: KCPOpts{
+			Profile: kcptun.DefaultProfile(),
+			FEC:     kcptun.FEC{},
+		},
+		ClientsFile: path, // в config-режиме клиенты хранятся внутри самого конфига
+	}
+
+	if fcfg.ObfTiming != "" {
+		d, durationErr := time.ParseDuration(fcfg.ObfTiming)
+		if durationErr != nil {
+			return nil, fmt.Errorf("config file: invalid obf_timing %q: %w", fcfg.ObfTiming, durationErr)
+		}
+		s.Obf.Timing = d
+	}
+
+	if err = validateObfProfile(s.Obf.Profile); err != nil {
+		return nil, fmt.Errorf("config file: %w", err)
+	}
+	key, err := rtpopus.DecodeKey(s.Obf.Enabled(), fcfg.ObfKey)
+	if err != nil {
+		return nil, fmt.Errorf("config file: %w", err)
+	}
+	s.Obf.Key = key
+	if err = validateObfTiming(s.Obf, s.Proxy.Mode); err != nil {
+		return nil, fmt.Errorf("config file: %w", err)
+	}
+
+	return s, nil
+}
+
+// PeekConfigFlag вытаскивает значение -config из сырых args без полного парсинга.
+func PeekConfigFlag(args []string) string {
+	for i := range args {
+		a := args[i]
+		if v, ok := strings.CutPrefix(a, "-config="); ok {
+			return v
+		}
+		if v, ok := strings.CutPrefix(a, "--config="); ok {
+			return v
+		}
+		if (a == "-config" || a == "--config") && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // PeekSubURL вытаскивает значение -sub из сырых args без полного парсинга.
@@ -390,6 +518,7 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 		fs.SetOutput(errOut)
 	}
 
+	config := fs.String("config", "", "путь к JSON-файлу конфигурации (игнорирует остальные флаги)")
 	listen := fs.String("listen", "0.0.0.0:56000", "локальный адрес прослушивания ip:port")
 	connect := fs.String("connect", "", "локальный бэкенд host:port; обязательно: WG 127.0.0.1:51820 | Xray 127.0.0.1:443")
 	mode := fs.String("mode", "udp", "режим туннеля: udp (WireGuard) | tcp (Xray/sing-box; bond авто)")
@@ -402,6 +531,10 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+
+	if *config != "" {
+		return ParseServerConfigFile(*config)
 	}
 
 	s := &Server{

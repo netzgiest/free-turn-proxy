@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,14 +30,24 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/uri"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 // version is populated at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	if len(os.Args) >= 2 && os.Args[1] == "clients" {
-		handleClientsCommand(os.Args[2:])
+	// Ищем "clients" среди аргументов — он может быть не на первой позиции (из-за -config).
+	if clientsIdx := findClientsArg(os.Args); clientsIdx >= 0 {
+		before := os.Args[1:clientsIdx] // флаги до "clients" (напр. -config path)
+		after := os.Args[clientsIdx+1:] // подкоманда после "clients"
+		configPath := config.PeekConfigFlag(before)
+		configPath2 := config.PeekConfigFlag(after)
+		if configPath2 != "" {
+			configPath = configPath2
+		}
+		args := stripConfigFlag(after)
+		handleClientsCommand(args, configPath)
 		return
 	}
 
@@ -202,6 +213,8 @@ func printShareLink(cfg *config.Server, logger logx.Logger) {
 	}
 	peer := net.JoinHostPort(host, port)
 
+	wgConf := readWGConfig()
+
 	u := &uri.Config{
 		Version:        1,
 		Provider:       "vk",
@@ -215,10 +228,31 @@ func printShareLink(cfg *config.Server, logger logx.Logger) {
 		ClientID:       clientID,
 		Listen:         "127.0.0.1:9000",
 		DNSMode:        "auto",
+		WgConf:         wgConf,
 	}
 
 	logger.Infof("Share link: %s", u.String())
 	logger.Infof("Add client to allowlist: %s clients add %s", os.Args[0], clientID)
+
+	printQR("Share link", u.String())
+}
+
+func readWGConfig() string {
+	const wgPath = "/opt/free-turn-proxy/wireguard-client.conf"
+	data, err := os.ReadFile(wgPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func printQR(label, content string) {
+	q, err := qrcode.New(content, qrcode.Medium)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "QR error (%s): %v\n", label, err)
+		return
+	}
+	fmt.Printf("\n=== %s QR ===\n%s\n", label, q.ToSmallString(false))
 }
 
 func detectPublicIP() string {
@@ -302,16 +336,69 @@ func handleAccepted(ctx context.Context, logger logx.Logger, registry *bondserve
 	logger.Debugf("Connection closed: %s", conn.RemoteAddr())
 }
 
-func handleClientsCommand(args []string) {
+// findClientsArg ищет позицию "clients" в os.Args (пропуская имя программы).
+// Возвращает -1 если не найден.
+func findClientsArg(args []string) int {
+	for i := 1; i < len(args); i++ {
+		if args[i] == "clients" {
+			return i
+		}
+	}
+	return -1
+}
+
+// stripConfigFlag удаляет -config <path> из args (независимо от формы: -config=X или -config X).
+func stripConfigFlag(args []string) []string {
+	out := make([]string, 0, len(args))
+	skip := false
+	for i, a := range args {
+		if skip {
+			skip = false
+			continue
+		}
+		if a == "-config" || a == "--config" {
+			// Следующий аргумент — значение, если оно не в форме -config=X
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				skip = true
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "-config=") || strings.HasPrefix(a, "--config=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func handleClientsCommand(args []string, configPath string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: server clients <add|remove|list> [args...]")
 		os.Exit(1)
 	}
 
-	// Файл по умолчанию или из переменной окружения
-	dbPath := "clients.json"
-	if envPath := os.Getenv("CLIENTS_FILE"); envPath != "" {
-		dbPath = envPath
+	// Если указан -config, клиенты хранятся внутри конфига
+	dbPath := configPath
+	if dbPath == "" {
+		dbPath = "clients.json"
+		if envPath := os.Getenv("CLIENTS_FILE"); envPath != "" {
+			dbPath = envPath
+		}
+	} else {
+		// Если config-файла нет, создаём шаблон
+		if _, statErr := os.Stat(dbPath); statErr != nil { //nolint:gosec
+			if errors.Is(statErr, os.ErrNotExist) {
+				dbPath = filepath.Clean(dbPath)
+				if writeErr := os.WriteFile(dbPath, []byte(config.DefaultConfigTemplate()), 0o600); writeErr != nil {
+					fmt.Printf("Failed to create %s: %v\n", dbPath, writeErr)
+					os.Exit(1)
+				}
+				fmt.Printf("Created %s\n", dbPath)
+			} else {
+				fmt.Printf("Failed to stat %s: %v\n", dbPath, statErr)
+				os.Exit(1)
+			}
+		}
 	}
 
 	db, err := clientsdb.New(dbPath)

@@ -35,6 +35,7 @@ type Config struct {
 	DNSServers     string
 	ManualCaptcha  bool
 	Comment        string
+	WgConf         string // полный WireGuard client.conf, опционально
 }
 
 // wire - JSON-схема payload. Короткие ключи, omitempty для чистоты ссылки.
@@ -55,6 +56,7 @@ type wire struct {
 	DNSServers     string `json:"dnss,omitempty"`
 	ManualCaptcha  bool   `json:"mcap,omitempty"`
 	Name           string `json:"name,omitempty"`
+	Wg             string `json:"wg,omitempty"`
 }
 
 // Parse разбирает строку freeturn://<base64url(json)>
@@ -106,6 +108,7 @@ func Parse(s string) (*Config, error) {
 		DNSServers:     w.DNSServers,
 		ManualCaptcha:  w.ManualCaptcha,
 		Comment:        w.Name,
+		WgConf:         w.Wg,
 	}, nil
 }
 
@@ -127,6 +130,7 @@ func (c *Config) String() string {
 		DNSServers:     c.DNSServers,
 		ManualCaptcha:  c.ManualCaptcha,
 		Name:           c.Comment,
+		Wg:             c.WgConf,
 	}
 	if c.ObfProfile != "" && c.ObfProfile != "none" {
 		w.Obf = c.ObfProfile

@@ -354,6 +354,7 @@ func (c *Conn) WrapInto(dst, payload []byte) (int, error) {
 
 func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	c.pktCounter++
+	seq := c.computeSeq()
 
 	// --- VAD state transition ---
 	startedSpeech := c.updateAudioState()
@@ -389,8 +390,12 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	isVideo := c.videoBurstRem > 0 && randRange(256) < videoChance
 	if isVideo {
 		c.videoBurstRem--
-		if c.log != nil && c.videoBurstRem == 0 {
-			c.log("[VIDEO] burst END")
+		if c.log != nil {
+			c.log("[VIDEO] pkt seq=%d ssrc=%x payload=%d burst_rem=%d",
+				seq, c.videoSSRC, plainLen, c.videoBurstRem)
+			if c.videoBurstRem == 0 {
+				c.log("[VIDEO] burst END")
+			}
 		}
 	}
 
@@ -448,7 +453,6 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	buf[1] = pt
 
 	// --- Sequence ---
-	seq := c.computeSeq()
 	binary.BigEndian.PutUint16(buf[2:4], seq)
 
 	// --- Timestamp ---
@@ -534,6 +538,11 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 		realLen := int(binary.BigEndian.Uint32(plain[:videoLenPrefix]))
 		if realLen < 0 || videoLenPrefix+realLen > len(plain) {
 			return nil, errors.New("rtpopus3:invalid video real_len")
+		}
+		if c.log != nil {
+			seq := binary.BigEndian.Uint16(wire[2:4])
+			ssrc := wire[8:12]
+			c.log("[VIDEO] recv seq=%d ssrc=%x real_len=%d", seq, ssrc, realLen)
 		}
 		return plain[videoLenPrefix : videoLenPrefix+realLen], nil
 	}
