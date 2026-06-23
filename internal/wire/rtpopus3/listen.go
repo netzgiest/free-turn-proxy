@@ -1,6 +1,7 @@
 package rtpopus3
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -56,7 +57,7 @@ func (l *Listener) Accept() (net.PacketConn, net.Addr, error) {
 	if l.logf != nil {
 		conn.SetLogf(l.logf)
 	}
-	return &packetConn{inner: pc, conn: conn}, addr, nil
+	return &packetConn{inner: pc, conn: conn, logf: l.logf}, addr, nil
 }
 
 func (l *Listener) Close() error   { return l.inner.Close() }
@@ -68,9 +69,27 @@ func isRTCP(b []byte) bool {
 	return len(b) >= 8 && (b[0]&0xC0) == 0x80 && b[1] >= 200 && b[1] <= 207
 }
 
+func rtcpPTName(pt byte) string {
+	switch pt {
+	case 200:
+		return "SR"
+	case 201:
+		return "RR"
+	case 202:
+		return "SDES"
+	case 203:
+		return "BYE"
+	case 204:
+		return "APP"
+	default:
+		return fmt.Sprintf("PT=%d", pt)
+	}
+}
+
 type packetConn struct {
 	inner net.PacketConn
 	conn  *Conn
+	logf  Logf
 }
 
 func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
@@ -97,6 +116,12 @@ func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		// RTCP-пакеты (инжектированные клиентом) не являются OBF;
 		// пропускаем их — они не предназначены DTLS-слою.
 		if isRTCP(wire) {
+			if c.logf != nil {
+				pt := wire[1]
+				ssrc := binary.BigEndian.Uint32(wire[4:8])
+				length := binary.BigEndian.Uint16(wire[2:4]) + 1
+				c.logf("[RTCP] skip %s ssrc=%x words=%d", rtcpPTName(pt), ssrc, length)
+			}
 			continue
 		}
 

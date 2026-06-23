@@ -25,6 +25,7 @@ type DB struct {
 	mu           sync.RWMutex
 	path         string
 	data         Data
+	raw          []byte // raw JSON всего файла (для embedded-режима с конфигом)
 	lastModified time.Time
 }
 
@@ -115,6 +116,7 @@ func (db *DB) load() error {
 	}
 
 	db.data = d
+	db.raw = b
 	db.lastModified = stat.ModTime()
 	return nil
 }
@@ -137,7 +139,24 @@ func (db *DB) loadIfModified() {
 }
 
 func (db *DB) save() error {
-	b, err := json.MarshalIndent(db.data, "", "  ")
+	var b []byte
+	var err error
+
+	if db.raw != nil {
+		// Embedded mode: сохраняем clients внутрь существующего JSON, не теряя остальные поля
+		var full map[string]any
+		if e := json.Unmarshal(db.raw, &full); e != nil {
+			return e
+		}
+		clientsMap := make(map[string]ClientInfo, len(db.data.Clients))
+		for k, v := range db.data.Clients {
+			clientsMap[k] = v
+		}
+		full["clients"] = clientsMap
+		b, err = json.MarshalIndent(full, "", "  ")
+	} else {
+		b, err = json.MarshalIndent(db.data, "", "  ")
+	}
 	if err != nil {
 		return err
 	}
