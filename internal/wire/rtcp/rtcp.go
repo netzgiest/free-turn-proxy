@@ -76,6 +76,93 @@ func BuildCompoundSR(ssrc uint32, rtpTS uint32, pktCount, octCount uint32, cname
 	return buf
 }
 
+// BuildReceiverReport собирает compound RTCP-пакет: Receiver Report + SDES CNAME.
+// В реальном WebRTC RR шлются каждые ~1-5s с обеих сторон.
+//
+// Формат RR:
+//
+//	RR (32 байта): 8B RTCP hdr + 24B RR body (SSRC + 1 report block)
+//	SDES (≥12B):  8B RTCP hdr + 4B SSRC + CNAME item + padding
+func BuildReceiverReport(ssrc uint32, cname []byte) []byte {
+	if len(cname) == 0 {
+		cname = []byte("rtc@webrtc")
+	}
+	if len(cname) > 255 {
+		cname = cname[:255]
+	}
+
+	// Report block: fraction_lost, cumulative_lost, ext_highest_seq, jitter, LSR, DLSR
+	fractionLost := uint8(randRange(8)) //nolint:gosec // random stats, safe range
+	cumLost := randRange(256)
+	highestSeq := uint32(randRange(65536)) //nolint:gosec // random stats, safe range
+	jitter := uint32(randRange(1000))      //nolint:gosec // random stats, safe range
+
+	// SDES item
+	sdesItemLen := 2 + len(cname)
+	sdesBodyLen := 4 + sdesItemLen
+	if rem := sdesBodyLen % 4; rem != 0 {
+		sdesBodyLen += 4 - rem
+	}
+	sdesLenWords := (8 + sdesBodyLen) / 4
+
+	// RR: 4B hdr + 4B sender SSRC + 24B report block = 32B = 8 words
+	totalLen := 32 + 4*sdesLenWords
+	buf := make([]byte, totalLen)
+
+	// RR
+	binary.BigEndian.PutUint32(buf[0:4], 0x81C90007) // V=2, RC=1, PT=201(RR), length=7
+	binary.BigEndian.PutUint32(buf[4:8], ssrc)
+	// Report block
+	buf[8] = fractionLost
+	buf[9] = byte(cumLost) //nolint:gosec // cumLost ∈ [0,255]
+	binary.BigEndian.PutUint32(buf[12:16], highestSeq)
+	binary.BigEndian.PutUint32(buf[16:20], jitter)
+	// LSR = 0 (no last SR), DLSR = 0
+	binary.BigEndian.PutUint32(buf[20:24], 0)
+	binary.BigEndian.PutUint32(buf[24:28], 0)
+	// Padding (4 bytes)
+	binary.BigEndian.PutUint32(buf[28:32], 0)
+
+	// SDES CNAME
+	sdesOff := 32
+	binary.BigEndian.PutUint32(buf[sdesOff:sdesOff+4], 0x81CA0000|uint32(sdesLenWords-1)) //nolint:gosec // sdesLenWords fits uint32
+	binary.BigEndian.PutUint32(buf[sdesOff+4:sdesOff+8], ssrc)
+	itemOff := sdesOff + 8
+	buf[itemOff] = sdesCNAME
+	buf[itemOff+1] = byte(len(cname)) //nolint:gosec // len(cname) ≤ 255
+	copy(buf[itemOff+2:], cname)
+
+	return buf
+}
+
+// BuildNACK собирает RTCP-пакет Generic NACK (RFC 4585, PT=205, FMT=1).
+// Используется приёмником для запроса переотправки потерянных пакетов.
+func BuildNACK(senderSSRC, mediaSSRC uint32, lostSeqs []uint16) []byte {
+	if len(lostSeqs) == 0 {
+		return nil
+	}
+	nFCI := len(lostSeqs)
+	// Each FCI = 8 bytes: PID (2B) + BLP (2B) + 4B padding to keep it simple
+	// RTCP header: 8B, FCI: nFCI*8B
+	pktLen := 8 + nFCI*8
+	// Ensure 32-bit alignment
+	if pktLen%4 != 0 {
+		pktLen += 4 - pktLen%4
+	}
+	buf := make([]byte, pktLen)
+	words := pktLen/4 - 1
+	binary.BigEndian.PutUint32(buf[0:4], 0x81CD0000|uint32(words)) //nolint:gosec // words fits uint32 // PT=205=RTPFB, FMT=1=NACK
+	binary.BigEndian.PutUint32(buf[4:8], senderSSRC)
+	binary.BigEndian.PutUint32(buf[8:12], mediaSSRC)
+
+	for i, seq := range lostSeqs {
+		off := 12 + i*8
+		binary.BigEndian.PutUint16(buf[off:off+2], seq)
+		binary.BigEndian.PutUint16(buf[off+2:off+4], 0) // BLP=0
+	}
+	return buf
+}
+
 // GenerateCNAME создаёт случайный CNAME как в Chromium WebRTC — base64 строка,
 // без @ и без домена (rtc_base::CreateRandomString).
 func GenerateCNAME() []byte {

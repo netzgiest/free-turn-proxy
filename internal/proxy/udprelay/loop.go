@@ -244,19 +244,6 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 		deps.log().Debugf("[STREAM %d] obf-timing=%s", streamID, params.ObfTiming)
 	}
 
-	// RTCP-инжектор: шлёт compound RTCP (SR+SDES) рядом с OBF-пакетами,
-	// имитируя настоящий WebRTC-поток. Только для rtpopus3 — серверная сторона
-	// должна уметь пропускать RTCP-пакеты (rtpopus3/listen.go обрабатывает это).
-	// rtpopus/rtpopus2 не поддерживают RTCP-инжекцию на серверной стороне.
-	if params.Profile == "rtpopus3" {
-		inj := rtcp.Wrap(relayConn, peer)
-		inj.SetLogf(func(format string, args ...any) {
-			deps.log().Debugf("[STREAM %d][rtcp] "+format, append([]any{streamID}, args...)...)
-		})
-		relayConn = inj
-		deps.log().Debugf("[STREAM %d] rtcp-injector enabled", streamID)
-	}
-
 	// Инкремент до ResetErrors - конкурентные наблюдатели HandleAuthError видят
 	// поток подключённым до сброса счётчика ошибок.
 	deps.ConnectedStreams.Add(1)
@@ -292,6 +279,20 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 		c.SetLogf(func(format string, args ...any) {
 			deps.log().Debugf("[STREAM %d][rtpopus3] "+format, append([]any{streamID}, args...)...)
 		})
+	}
+
+	// RTCP-инжектор: шлёт compound RTCP (SR+SDES/RR+SDES) рядом с OBF-пакетами,
+	// имитируя настоящий WebRTC-поток. Только для rtpopus3 — серверная сторона
+	// должна уметь пропускать RTCP-пакеты (rtpopus3/listen.go обрабатывает это).
+	// rtpopus/rtpopus2 не поддерживают RTCP-инжекцию на серверной стороне.
+	if params.Profile == "rtpopus3" {
+		obfOverhead := obfConn.Overhead()
+		inj := rtcp.Wrap(relayConn, peer, obfOverhead)
+		inj.SetLogf(func(format string, args ...any) {
+			deps.log().Debugf("[STREAM %d][rtcp] "+format, append([]any{streamID}, args...)...)
+		})
+		relayConn = inj
+		deps.log().Debugf("[STREAM %d] rtcp-injector enabled", streamID)
 	}
 
 	const maxPayload = 1600
@@ -369,6 +370,11 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			if err1 != nil {
 				return
 			}
+			// Server-side RTCP packets (RR/NACK) are not OBF — skip silently
+			if n >= 8 && (buf[0]&0xC0) == 0x80 && buf[1] >= 200 && buf[1] <= 207 {
+				continue
+			}
+
 			addr1 := internalPipeAddr.Load()
 			if addr1 == nil {
 				continue

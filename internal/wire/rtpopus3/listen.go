@@ -1,6 +1,7 @@
 package rtpopus3
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 
 	dtlsnet "github.com/pion/dtls/v3/pkg/net"
 	pionudp "github.com/pion/transport/v4/udp"
+
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtcp"
 )
 
 const maxRTCPAttempts = 256
@@ -20,6 +23,12 @@ var bufPool = sync.Pool{
 		return &b
 	},
 }
+
+func init() {
+	rand.Read(servCNAME[:])
+}
+
+var servCNAME [12]byte
 
 func Listen(addr *net.UDPAddr, key []byte) (dtlsnet.PacketListener, error) {
 	state, err := NewState(key)
@@ -90,6 +99,13 @@ type packetConn struct {
 	inner net.PacketConn
 	conn  *Conn
 	logf  Logf
+
+	// Server-side RTCP injection
+	lastRTCP    time.Time
+	rtcpIntv    time.Duration
+	lastSeq     map[uint32]uint16 // per-SSRC: last seen sequence number
+	lastSeqTime map[uint32]time.Time
+	nackQueue   []uint16 // sequence numbers to NACK
 }
 
 func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
@@ -128,6 +144,30 @@ func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		if len(wire) < overhead {
 			return 0, addr, errors.New("rtpopus3:packet too short")
 		}
+
+		// Track sequence numbers for NACK detection
+		if len(wire) >= 12 && (wire[0]&0xC0) == 0x80 {
+			cliSSRC := binary.BigEndian.Uint32(wire[8:12])
+			cliSeq := binary.BigEndian.Uint16(wire[2:4])
+			if prevSeq, ok := c.lastSeq[cliSSRC]; ok {
+				diff := int(cliSeq) - int(prevSeq)
+				// NACK only reasonable gaps (matches our loss simulation)
+				if diff > 1 && diff <= 10 {
+					if c.lastSeqTime[cliSSRC].IsZero() || time.Since(c.lastSeqTime[cliSSRC]) > 500*time.Millisecond {
+						for s := prevSeq + 1; s != cliSeq; s++ {
+							c.nackQueue = append(c.nackQueue, s)
+						}
+						c.lastSeqTime[cliSSRC] = time.Now()
+					}
+				}
+			}
+			if c.lastSeq == nil {
+				c.lastSeq = make(map[uint32]uint16)
+				c.lastSeqTime = make(map[uint32]time.Time)
+			}
+			c.lastSeq[cliSSRC] = cliSeq
+		}
+
 		m, err := c.conn.Unwrap(wire, p)
 		if err != nil {
 			return 0, addr, err
@@ -138,6 +178,12 @@ func (c *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 func (c *packetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	// Server-side RTCP injection: RR + NACK
+	now := time.Now()
+	if c.lastRTCP.IsZero() || now.Sub(c.lastRTCP) > c.rtcpInterval() {
+		c.sendRTCP(now, addr)
+	}
+
 	wireLen := c.conn.MaxWire(len(p))
 
 	bpAny := bufPool.Get()
@@ -161,6 +207,58 @@ func (c *packetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+func (*packetConn) rtcpInterval() time.Duration {
+	base := 1000 * time.Millisecond
+	jitter := time.Duration(randInt(4000)) * time.Millisecond
+	return base + jitter
+}
+
+func (c *packetConn) sendRTCP(now time.Time, addr net.Addr) {
+	c.lastRTCP = now
+	c.rtcpIntv = c.rtcpInterval()
+
+	// Build NACK if we have queued losses
+	var nackPkt []byte
+	var nackSeqs []uint16
+	if len(c.nackQueue) > 0 {
+		nackSeqs = c.nackQueue
+		if len(nackSeqs) > 8 {
+			nackSeqs = nackSeqs[:8]
+		}
+		// senderSSRC = server SSRC, mediaSSRC = pick from tracked SSRCs
+		srvSSRC := binary.BigEndian.Uint32(c.conn.ssrc[:])
+		var mediaSSRC uint32
+		for ssrc := range c.lastSeq {
+			if ssrc != srvSSRC {
+				mediaSSRC = ssrc
+				break
+			}
+		}
+		if mediaSSRC == 0 {
+			mediaSSRC = srvSSRC
+		}
+		nackPkt = rtcp.BuildNACK(srvSSRC, mediaSSRC, nackSeqs)
+		c.nackQueue = c.nackQueue[len(nackSeqs):]
+	}
+
+	// Build RR
+	srvSSRC := binary.BigEndian.Uint32(c.conn.ssrc[:])
+	rrPkt := rtcp.BuildReceiverReport(srvSSRC, servCNAME[:])
+
+	if len(nackPkt) > 0 && c.logf != nil {
+		c.logf("[RTCP] send NACK seqs=%v", nackSeqs)
+	}
+	if len(nackPkt) > 0 {
+		_, _ = c.inner.WriteTo(nackPkt, addr)
+	}
+	if len(rrPkt) > 0 {
+		if c.logf != nil {
+			c.logf("[RTCP] send RR ssrc=%x", srvSSRC)
+		}
+		_, _ = c.inner.WriteTo(rrPkt, addr)
+	}
 }
 
 func (c *packetConn) Close() error                       { return c.inner.Close() }

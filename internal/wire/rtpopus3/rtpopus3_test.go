@@ -35,8 +35,8 @@ func TestWrapInPlaceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n < overhead+len(payload) || n > overhead+len(payload)+paddingMax {
-		t.Fatalf("wire len = %d, want [%d, %d]", n, overhead+len(payload), overhead+len(payload)+paddingMax)
+	if n < overhead+len(payload) || n > overhead+len(payload)+speechPadMax {
+		t.Fatalf("wire len = %d, want [%d, %d]", n, overhead+len(payload), overhead+len(payload)+speechPadMax)
 	}
 	plain, err := srv.UnwrapInPlace(buf[:n])
 	if err != nil {
@@ -87,14 +87,20 @@ func TestHeaderShape(t *testing.T) {
 	if buf[12] != 0xBE || buf[13] != 0xDE {
 		t.Errorf("ext profile = 0x%02x%02x, want 0xBEDE", buf[12], buf[13])
 	}
-	if w := binary.BigEndian.Uint16(buf[14:16]); w != 3 {
-		t.Errorf("ext length = %d words, want 3", w)
+	if w := binary.BigEndian.Uint16(buf[14:16]); w != 4 {
+		t.Errorf("ext length = %d words, want 4", w)
 	}
 	if buf[16] != extAudioLevelHdr || buf[18] != extTransportHdr || buf[21] != extAbsSendTimeHdr {
 		t.Errorf("ext element headers = 0x%02x 0x%02x 0x%02x, want 0x10 0x21 0x32",
 			buf[16], buf[18], buf[21])
 	}
-	if buf[28]&0x80 != 0 {
+	if buf[25] != extMIDHdr {
+		t.Errorf("ext element 4 = 0x%02x, want 0x40 (MID)", buf[25])
+	}
+	if buf[27] != extVideoMarkHdr {
+		t.Errorf("ext element 5 = 0x%02x, want 0x50 (video marking)", buf[27])
+	}
+	if buf[32]&0x80 != 0 {
 		t.Errorf("client nonce sessionID MSB set, want clear (direction bit)")
 	}
 }
@@ -109,7 +115,7 @@ func TestServerDirectionBit(t *testing.T) {
 	if _, err := srv.WrapInPlace(buf, len(payload)); err != nil {
 		t.Fatal(err)
 	}
-	if buf[28]&0x80 == 0 {
+	if buf[32]&0x80 == 0 {
 		t.Errorf("server nonce sessionID MSB clear, want set (direction bit)")
 	}
 }

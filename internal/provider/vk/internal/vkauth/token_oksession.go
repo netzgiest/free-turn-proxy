@@ -21,6 +21,7 @@ func (c *Client) fetchOkRuSession(ctx context.Context, httpClient tlsclient.Http
 	if err != nil {
 		return "", err
 	}
+	c.log.Debugf("[VK Auth] auth.anonymLogin response: %v", resp)
 	sessionKey, ok := resp["session_key"].(string)
 	if !ok {
 		return "", fmt.Errorf("missing session_key in response: %v", resp)

@@ -1,40 +1,45 @@
 // SPDX-License-Identifier: MIT
 
-// Package rtpopus3 - wire-профиль обфускации с улучшенной RTP-мимикрией:
-// три one-byte extension (audio-level, transport-wide-cc, abs-send-time),
-// вариативный шаг timestamp, эмуляция потери пакетов (gaps в seq),
-// VAD-модель с переключением silence/speech, эмуляция RTP padding.
+// Package rtpopus3 - wire-профиль обфускации с продвинутой RTP-мимикрией:
+// пять one-byte extension (audio-level, transport-wide-cc, abs-send-time,
+// MID, video frame marking), вариативный шаг timestamp, эмуляция потери
+// пакетов (gaps в seq), VAD-модель silence/speech, эмуляция RTP padding
+// с распределением по VAD, Comfort Noise (PT=13) во время молчания,
+// RED (PT=127) для имитации FEC, мульти-SSRC видео-всплески VP8.
 //
-// Wire-формат (HeaderLen=40, Overhead=56):
+// Wire-формат (HeaderLen=44, Overhead=60):
 //
-//	[12B RTP hdr | 16B one-byte ext | 12B explicit nonce | AEAD ciphertext | 16B tag]
+//	[12B RTP hdr | 20B one-byte ext | 12B explicit nonce | AEAD ciphertext | 16B tag]
 //
 // RTP header (RFC 3550):
 //
-//	byte 0:    0x90|0x20   V=2, P=0/1 (padding ~10%), X=1, CC=0
-//	byte 1:    M<<7 | 0x6F M=1 на старте talkspurt, PT=111 (opus)
+//	byte 0:    0x90|0x20   V=2, P=0/1, X=1, CC=0
+//	byte 1:    M<<7 | PT   PT=111(opus)/13(CN)/127(RED)/96(VP8)
 //	byte 2-3:  seq16 BE    монотонный с пропусками (loss simulation)
 //	byte 4-7:  ts32 BE     вариативный шаг 480/960/1920 (10/20/40ms)
-//	byte 8-11: SSRC        полностью random per conn
+//	byte 8-11: SSRC        random per conn, видео-всплески отдельный SSRC
 //
-// RTP extension (RFC 8285 one-byte, 12 байт данных -> 3 слова):
+// RTP extension (RFC 8285 one-byte, 16 байт данных -> 4 слова):
 //
 //	byte 12-13: 0xBE 0xDE      профиль one-byte
-//	byte 14-15: 0x0003         длина = 3 слова (12 байт данных)
-//	byte 16:    0x10           ssrc-audio-level: id=1, len=1
+//	byte 14-15: 0x0004         длина = 4 слова (16 байт данных)
+//	byte 16:    0x10           ssrc-audio-level: id=1, len=0
 //	byte 17:    0x80|level     VAD + level (-dBov)
-//	byte 18:    0x21           transport-wide-cc: id=2, len=2
+//	byte 18:    0x21           transport-wide-cc: id=2, len=1
 //	byte 19-20: tccSeq16       монотонный transport-cc sequence
 //	byte 21:    0x32           abs-send-time: id=3, len=2
-//	byte 22-24: abs_send_time  24-bit NTP timestamp (mod 64s)
-//	byte 25-27: 0x00           padding до 12 байт данных расширения
+//	byte 22-24: abs_send_time  24-bit NTP timestamp
+//	byte 25:    0x40           MID: id=4, len=0
+//	byte 26:    'a'|'v'       media stream ID (audio/video)
+//	byte 27:    0x50           video-frame-marking: id=5, len=0
+//	byte 28:    mark_byte      S|E|I|0|T2|T1|T0|0
+//	byte 29-31: 0x00           padding до 16 байт
 //
 // 12B explicit nonce = 4B sessionID || 8B counter (BE). MSB sessionID
-// кодирует направление. AAD = первые 40 байт (RTP hdr || ext || nonce).
+// кодирует направление. AAD = первые 44 байт (RTP hdr || ext || nonce).
 //
-// RTP padding (RFC 3550 §5.3.1): ~10% пакетов имеют P=1 и 1-4 байта padding
-// в конце payload (до AEAD). Последний байт padding — длина padding'а.
-// Приёмник читает P-бит, после AEAD-расшифровки отрезает padLen последних байт.
+// VAD-распределение padding: во время речи 15% пакетов имеют P=1 и 2-8 байт,
+// во время молчания 5% пакетов имеют 1-2 байта (как Comfort Noise).
 package rtpopus3
 
 import (
@@ -54,30 +59,50 @@ import (
 const (
 	KeyLen    = 32
 	rtpHdrLen = 12
-	rtpExtLen = 16
+	rtpExtLen = 20 // 4-word one-byte extension
 	nonceLen  = 12
 	tagLen    = 16
-	headerLen = rtpHdrLen + rtpExtLen + nonceLen // 40
-	overhead  = headerLen + tagLen               // 56
+	headerLen = rtpHdrLen + rtpExtLen + nonceLen // 44
+	overhead  = headerLen + tagLen               // 60
 	rtpVerExt = 0x90                             // V=2, P=0, X=1, CC=0
 	rtpPT     = 0x6F                             // M=0, PT=111 (opus)
 	rtpMarker = 0x80                             // M=1
 
-	rtpPaddingBit = 0x20 // P=1 в RTP header (byte 0, bit 5)
+	rtpPaddingBit = 0x20 // P=1
 
-	paddingChance = 26 // 26/256 ≈ 10%
-	paddingMin    = 1
-	paddingMax    = 4
+	extAudioLevelHdr  = 0x10 // id=1, len=0 (1 byte data)
+	extTransportHdr   = 0x21 // id=2, len=1 (2 bytes data)
+	extAbsSendTimeHdr = 0x32 // id=3, len=2 (3 bytes data)
+	extMIDHdr         = 0x40 // id=4, len=0 (1 byte data)
+	extVideoMarkHdr   = 0x50 // id=5, len=0 (1 byte data)
 
-	extAudioLevelHdr  = 0x10 // id=1, len=1
-	extTransportHdr   = 0x21 // id=2, len=2
-	extAbsSendTimeHdr = 0x32 // id=3, len=2
+	videoMarkS = 0x80 // start of frame
+	videoMarkE = 0x40 // end of frame
+	videoMarkI = 0x20 // keyframe
 
-	speechMinPkts     = 30  // минимум speech в пакетах (0.6s @ 50pps)
-	speechShape       = 1.4 // α для Pareto-распределения speech
-	silenceMeanPkts   = 15  // средняя micro-пауза (0.3s)
-	silenceTurnMean   = 75  // средняя turn-taking пауза (1.5s)
-	silenceTurnChance = 26  // 26/256 ≈ 10% шанс длинной паузы
+	// Comfort Noise (RFC 3389)
+	cnPT            = 13
+	cnSilenceChance = 76 // 76/256 ≈ 30% during silence
+
+	// RED (RFC 2198)
+	redPT           = 127
+	redSpeechChance = 38 // 38/256 ≈ 15% during speech
+
+	// VAD-based RTP padding
+	speechPadChance = 38 // 38/256 ≈ 15% during speech
+	speechPadMin    = 2
+	speechPadMax    = 8
+	cnPadChance     = 13 // 13/256 ≈ 5% during silence
+	cnPadMin        = 1
+	cnPadMax        = 2
+	redPadMin       = 2
+	redPadMax       = 6
+
+	speechMinPkts     = 30
+	speechShape       = 1.4
+	silenceMeanPkts   = 15
+	silenceTurnMean   = 75
+	silenceTurnChance = 26
 
 	gapIntervalMin = 50
 	gapIntervalMax = 150
@@ -88,22 +113,21 @@ const (
 	tsStep10ms = 480
 	tsStep40ms = 1920
 
-	// Multi-SSRC video simulation
-	videoPT             = 96    // VP8 payload type
-	videoBurstMin       = 50    // минимум пакетов в одной «вспышке» видео
-	videoBurstMax       = 200   // максимум (кап после Pareto)
-	videoBurstShape     = 1.5   // α для Pareto-распределения длины burst
-	videoIntervalMin    = 6000  // минимум пакетов между вспышками
-	videoIntervalMax    = 60000 // кап после Pareto (~2min при 50pps)
-	videoIntervalShape  = 1.4   // α для Pareto-распределения интервала
-	videoPktMinSize     = 400   // целевой размер видео-пакета (байт)
+	videoPT             = 96
+	videoBurstMin       = 50
+	videoBurstMax       = 200
+	videoBurstShape     = 1.5
+	videoIntervalMin    = 6000
+	videoIntervalMax    = 60000
+	videoIntervalShape  = 1.4
+	videoPktMinSize     = 400
 	videoPktMaxSize     = 900
-	videoLenPrefix      = 4  // байт префикса с real_len перед payload
-	videoBurstSpeechMin = 30 // сколько speech-пакетов должно пройти до burst
-	videoChance         = 85 // 85/256 ≈ 33% — шанс что конкретный пакет в burst будет видео
+	videoLenPrefix      = 4
+	videoBurstSpeechMin = 30
+	videoChance         = 85
 )
 
-func MaxWire(payloadLen int) int { return overhead + payloadLen + paddingMax + videoPktMaxSize }
+func MaxWire(payloadLen int) int { return overhead + payloadLen + speechPadMax + videoPktMaxSize }
 
 type audioState int
 
@@ -174,8 +198,8 @@ func NewConnFromState(state *State, isServer bool) (*Conn, error) {
 		startTime:       time.Now(),
 		audioState:      stateSpeech,
 		nextStateSwitch: randPareto(speechMinPkts, speechShape),
-		nextGapAt:       gapIntervalMin + randRange(gapIntervalMax-gapIntervalMin+1),
-		gapSize:         gapSizeMin + randRange(gapSizeMax-gapSizeMin+1),
+		nextGapAt:       gapIntervalMin + randInt(gapIntervalMax-gapIntervalMin+1),
+		gapSize:         gapSizeMin + randInt(gapSizeMax-gapSizeMin+1),
 	}
 	var rnd [16]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
@@ -207,7 +231,7 @@ func NewConnFromState(state *State, isServer bool) (*Conn, error) {
 	if c.videoInterval > videoIntervalMax {
 		c.videoInterval = videoIntervalMax
 	}
-	initialDelay := videoIntervalMin + randRange(2*videoIntervalMin)
+	initialDelay := videoIntervalMin + randInt(2*videoIntervalMin)
 	if initialDelay < 0 {
 		initialDelay = 0
 	}
@@ -231,7 +255,7 @@ func (c *Conn) SetVideoInterval(packets int) {
 	c.nextVideoBurst = c.pktCounter + uint64(packets)
 }
 
-func randRange(n int) int {
+func randInt(n int) int {
 	if n <= 0 {
 		return 0
 	}
@@ -242,8 +266,8 @@ func randRange(n int) int {
 	return int(b[0]) % n
 }
 
-// randFloat01 возвращает равномерное (0, 1] из crypto/rand.
-func randFloat01() float64 {
+// randFloat возвращает равномерное (0, 1] из crypto/rand.
+func randFloat() float64 {
 	var b [7]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		panic("rtpopus3:rand: " + err.Error())
@@ -256,14 +280,14 @@ func randFloat01() float64 {
 // randPareto генерирует Pareto-распределение с shape α и минимумом shift.
 // Используется для длительности речи (тяжёлый хвост).
 func randPareto(shift int, alpha float64) int {
-	u := randFloat01()
+	u := randFloat()
 	return shift + int(float64(shift)*math.Pow(1-u, -1/alpha))
 }
 
-// randExponential генерирует экспоненциальное распределение с заданным mean.
+// randExp генерирует экспоненциальное распределение с заданным mean.
 // Используется для длительности пауз.
-func randExponential(mean int) int {
-	u := randFloat01()
+func randExp(mean int) int {
+	u := randFloat()
 	if u < 1e-15 {
 		u = 1e-15
 	}
@@ -271,7 +295,7 @@ func randExponential(mean int) int {
 }
 
 func pickTsStep() uint32 {
-	r := randRange(256)
+	r := randInt(256)
 	switch {
 	case r < 10:
 		return tsStep10ms
@@ -297,10 +321,10 @@ func (c *Conn) updateAudioState() bool {
 		return true
 	}
 	var dur int
-	if randRange(256) < silenceTurnChance {
-		dur = randExponential(silenceTurnMean)
+	if randInt(256) < silenceTurnChance {
+		dur = randExp(silenceTurnMean)
 	} else {
-		dur = randExponential(silenceMeanPkts)
+		dur = randExp(silenceMeanPkts)
 	}
 	c.audioState = stateSilence
 	c.nextStateSwitch = dur
@@ -316,9 +340,9 @@ func (c *Conn) updateAudioState() bool {
 
 func (c *Conn) audioLevel() byte {
 	if c.audioState == stateSpeech {
-		return 0x80 | byte(20+randRange(31)) //nolint:gosec // bound: 20+[0,30] < 256
+		return 0x80 | byte(20+randInt(31)) //nolint:gosec // bound: 20+[0,30] < 256
 	}
-	return byte(100 + randRange(28)) //nolint:gosec // bound: 100+[0,27] < 256
+	return byte(100 + randInt(28)) //nolint:gosec // bound: 100+[0,27] < 256
 }
 
 func (c *Conn) computeSeq() uint16 {
@@ -329,8 +353,8 @@ func (c *Conn) computeSeq() uint16 {
 	}
 	skip := uint32(c.gapSize) //nolint:gosec // gapSize ≤ 3
 	c.seq.Add(skip)
-	c.nextGapAt = gapIntervalMin + randRange(gapIntervalMax-gapIntervalMin+1)
-	c.gapSize = gapSizeMin + randRange(gapSizeMax-gapSizeMin+1)
+	c.nextGapAt = gapIntervalMin + randInt(gapIntervalMax-gapIntervalMin+1)
+	c.gapSize = gapSizeMin + randInt(gapSizeMax-gapSizeMin+1)
 	return seq
 }
 
@@ -342,6 +366,27 @@ func (c *Conn) absSendTime() uint32 {
 	sec := (ms / 1000) % 64
 	frac := (ms % 1000) << 18 / 1000
 	return uint32(sec)<<18 | uint32(frac)
+}
+
+func videoMarking() byte {
+	var mark byte
+	r := randInt(10)
+	switch {
+	case r < 2:
+		mark |= videoMarkS | videoMarkI
+	case r < 4:
+		mark |= videoMarkS
+	case r < 6:
+		mark |= videoMarkE
+	}
+	tid := byte(0) //nolint:gosec // tid ∈ [0,2]
+	tr := randInt(10)
+	if tr >= 7 && tr < 9 {
+		tid = 1
+	} else if tr >= 9 {
+		tid = 2
+	}
+	return mark | (tid << 1)
 }
 
 func (c *Conn) WrapInto(dst, payload []byte) (int, error) {
@@ -387,7 +432,7 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	}
 
 	// --- Decide if THIS packet is video (only ~33% of burst, rest stays audio) ---
-	isVideo := c.videoBurstRem > 0 && randRange(256) < videoChance
+	isVideo := c.videoBurstRem > 0 && randInt(256) < videoChance
 	if isVideo {
 		c.videoBurstRem--
 		if c.log != nil {
@@ -399,10 +444,14 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 		}
 	}
 
+	// --- Determine CN/RED mode for audio ---
+	isCN := !isVideo && c.audioState == stateSilence && randInt(256) < cnSilenceChance
+	isRED := !isVideo && isSpeech && !isCN && randInt(256) < redSpeechChance
+
 	// --- Compute plaintext sizes ---
 	var extra int
 	if isVideo {
-		target := videoPktMinSize + randRange(videoPktMaxSize-videoPktMinSize+1)
+		target := videoPktMinSize + randInt(videoPktMaxSize-videoPktMinSize+1)
 		fillerLen := target - (videoLenPrefix + plainLen)
 		if fillerLen < 0 {
 			fillerLen = 0
@@ -411,8 +460,26 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	}
 
 	padLen := 0
-	if !isVideo && randRange(256) < paddingChance {
-		padLen = paddingMin + randRange(paddingMax-paddingMin+1)
+	if !isVideo {
+		var padChance int
+		var padMin, padMax int
+		switch {
+		case isRED:
+			padChance = 256
+			padMin = redPadMin
+			padMax = redPadMax
+		case isCN:
+			padChance = cnPadChance
+			padMin = cnPadMin
+			padMax = cnPadMax
+		default:
+			padChance = speechPadChance
+			padMin = speechPadMin
+			padMax = speechPadMax
+		}
+		if randInt(256) < padChance {
+			padLen = padMin + randInt(padMax-padMin+1)
+		}
 	}
 
 	wireLen := overhead + plainLen + extra + padLen
@@ -430,7 +497,7 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 		fillerLen := extra - videoLenPrefix
 		fillerStart := headerLen + videoLenPrefix + plainLen
 		for i := 0; i < fillerLen; i++ {
-			buf[fillerStart+i] = byte(randRange(256)) //nolint:gosec // randRange(256)∈[0,255]
+			buf[fillerStart+i] = byte(randInt(256)) //nolint:gosec // randInt(256)∈[0,255]
 		}
 	}
 
@@ -442,9 +509,14 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 
 	// --- RTP header byte 1 (PT + marker) ---
 	var pt byte
-	if isVideo {
+	switch {
+	case isVideo:
 		pt = byte(videoPT)
-	} else {
+	case isCN:
+		pt = byte(cnPT)
+	case isRED:
+		pt = byte(redPT)
+	default:
 		pt = byte(rtpPT)
 		if startedSpeech && isSpeech {
 			pt |= rtpMarker
@@ -467,39 +539,57 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 		copy(buf[8:12], c.ssrc[:])
 	}
 
-	// --- RTP one-byte extensions ---
+	// --- RTP one-byte extensions (4 words = 16 bytes data) ---
 	buf[12] = 0xBE
 	buf[13] = 0xDE
-	binary.BigEndian.PutUint16(buf[14:16], 3)
+	binary.BigEndian.PutUint16(buf[14:16], 4)
+
 	buf[16] = extAudioLevelHdr
 	buf[17] = c.audioLevel()
+
 	buf[18] = extTransportHdr
 	tcc := uint16(c.tcc.Add(1) - 1) //nolint:gosec // RTP transport-cc seq wraps at 16 bits
 	binary.BigEndian.PutUint16(buf[19:21], tcc)
+
 	buf[21] = extAbsSendTimeHdr
 	ast := c.absSendTime()
 	buf[22] = byte(ast >> 16) //nolint:gosec // ast is 24-bit NTP timestamp
 	buf[23] = byte(ast >> 8)  //nolint:gosec
 	buf[24] = byte(ast)       //nolint:gosec
-	buf[25], buf[26], buf[27] = 0, 0, 0
+
+	buf[25] = extMIDHdr
+	if isVideo {
+		buf[26] = 'v'
+	} else {
+		buf[26] = 'a'
+	}
+
+	buf[27] = extVideoMarkHdr
+	if isVideo {
+		buf[28] = videoMarking()
+	} else {
+		buf[28] = 0
+	}
+
+	buf[29], buf[30], buf[31] = 0, 0, 0
 
 	// --- Nonce ---
-	copy(buf[28:32], c.sessionID[:])
+	copy(buf[32:36], c.sessionID[:])
 	ctr := c.counter.Add(1) - 1
-	binary.BigEndian.PutUint64(buf[32:headerLen], ctr)
+	binary.BigEndian.PutUint64(buf[36:44], ctr)
 
-	// --- RTP padding bytes (audio only) ---
+	// --- RTP padding bytes ---
 	if padLen > 0 {
 		padStart := headerLen + plainLen + extra
 		for i := 0; i < padLen; i++ {
-			buf[padStart+i] = byte(randRange(256)) //nolint:gosec // randRange(256)∈[0,255]
+			buf[padStart+i] = byte(randInt(256)) //nolint:gosec // randInt(256)∈[0,255]
 		}
-		buf[padStart+padLen-1] = byte(padLen) //nolint:gosec // padLen∈[1,4]
+		buf[padStart+padLen-1] = byte(padLen) //nolint:gosec // padLen∈[1,8]
 	}
 
 	// --- AEAD ---
-	nonce := buf[28:headerLen]
-	aad := buf[:headerLen]
+	nonce := buf[32:44]
+	aad := buf[:44]
 	plainEnd := headerLen + plainLen + extra + padLen
 	c.state.aead.Seal(buf[headerLen:headerLen], nonce, buf[headerLen:plainEnd], aad)
 	return wireLen, nil
@@ -521,17 +611,16 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 	if len(wire) < overhead {
 		return nil, errors.New("rtpopus3:packet too short")
 	}
-	nonce := wire[28:headerLen]
-	aad := wire[:headerLen]
-	ct := wire[headerLen:]
+	nonce := wire[32:44]
+	aad := wire[:44]
+	ct := wire[44:]
 
 	plain, err := c.state.aead.Open(ct[:0], nonce, ct, aad)
 	if err != nil {
 		return nil, fmt.Errorf("rtpopus3:AEAD open: %w", err)
 	}
 
-	isVideo := (wire[1] & 0x7F) == videoPT
-	if isVideo {
+	if (wire[1] & 0x7F) == videoPT {
 		if len(plain) < videoLenPrefix {
 			return nil, errors.New("rtpopus3:video packet too short")
 		}

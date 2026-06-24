@@ -27,6 +27,7 @@ func (c *Client) fetchTurnCreds(
 	if err != nil {
 		return "", "", nil, err
 	}
+	c.log.Debugf("[STREAM %d] [VK Auth] vchat.joinConversationByLink response: %v", streamID, resp)
 
 	tsRaw, ok := resp["turn_server"].(map[string]any)
 	if !ok {
