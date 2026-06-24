@@ -37,10 +37,14 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 		return "", "", nil, delayErr
 	}
 
+	apiVersion := getAPIVersion(ctx, link, httpClient, profile, func(format string, args ...any) {
+		c.log.Infof("[STREAM %d] "+format, append([]any{streamID}, args...)...)
+	})
+
 	// Шаг 1a: прогрев getCallPreview (не критично).
 	previewData := fmt.Sprintf("vk_join_link=https://vk.ru/call/join/%s&fields=photo_200&access_token=%s", link, token1)
 	if _, prevErr := c.doRequest(ctx, httpClient, profile, previewData,
-		"https://api.vk.com/method/calls.getCallPreview?v="+APIVersion+"&client_id="+creds.ClientID); prevErr != nil {
+		"https://api.vk.com/method/calls.getCallPreview?v="+apiVersion+"&client_id="+creds.ClientID); prevErr != nil {
 		c.log.Warnf("[STREAM %d] [VK Auth] getCallPreview failed: %v", streamID, prevErr)
 	}
 
@@ -49,7 +53,7 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	}
 
 	// Шаг 2: анонимный call-токен (здесь может сработать captcha).
-	token2, err := c.fetchCallToken(ctx, httpClient, profile, streamID, link, escapedName, token1, creds)
+	token2, err := c.fetchCallToken(ctx, httpClient, profile, streamID, link, escapedName, token1, creds, apiVersion)
 	if err != nil {
 		return "", "", nil, err
 	}

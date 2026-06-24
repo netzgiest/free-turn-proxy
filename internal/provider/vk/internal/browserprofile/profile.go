@@ -92,5 +92,4 @@ func ApplyFhttp(req *fhttp.Request, profile Profile) {
 		acceptLang = "en-US,en;q=0.9"
 	}
 	req.Header.Set("Accept-Language", acceptLang)
-	req.Header.Set("DNT", "1")
 }

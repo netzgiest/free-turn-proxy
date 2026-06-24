@@ -43,7 +43,7 @@ type Config struct {
 	ManualSolver ManualSolveFunc
 
 	// Browser - браузерный профиль (UA + JA3 + client hints) для control-plane.
-	// Нулевое значение -> Chrome (исторический дефолт для прямых вызовов в тестах).
+	// Нулевое значение -> Firefox (KindFromString("") -> Firefox).
 	Browser browserprofile.Kind
 
 	// Log - уровневый логгер. nil -> no-op.

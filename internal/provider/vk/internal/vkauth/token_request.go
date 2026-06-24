@@ -14,6 +14,42 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 )
 
+var (
+	chromeHeaderOrder = []string{
+		"host",
+		"content-length",
+		"sec-ch-ua-platform",
+		"accept-language",
+		"sec-ch-ua",
+		"content-type",
+		"sec-ch-ua-mobile",
+		"user-agent",
+		"accept",
+		"origin",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"priority",
+	}
+	firefoxHeaderOrder = []string{
+		"host",
+		"content-length",
+		"user-agent",
+		"content-type",
+		"accept",
+		"origin",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"priority",
+	}
+	pHeaderOrder = []string{":method", ":path", ":authority", ":scheme"}
+)
+
 // doRequest отправляет POST form-запрос по url через tls-клиент с браузерным
 // профилем и десериализует JSON-тело ответа.
 func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, data, url string) (map[string]any, error) {
@@ -37,6 +73,13 @@ func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient,
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Priority", "u=1, i")
+
+	if profile.SecChUa != "" {
+		req.Header[fhttp.HeaderOrderKey] = chromeHeaderOrder
+	} else {
+		req.Header[fhttp.HeaderOrderKey] = firefoxHeaderOrder
+	}
+	req.Header[fhttp.PHeaderOrderKey] = pHeaderOrder
 
 	httpResp, err := httpClient.Do(req)
 	if err != nil {

@@ -28,8 +28,9 @@ func (c *Client) fetchCallToken(
 	streamID int,
 	link, escapedName, token1 string,
 	creds VKCredentials,
+	apiVersion string,
 ) (string, error) {
-	urlAddr := fmt.Sprintf("https://api.vk.com/method/calls.getAnonymousToken?v=%s&client_id=%s", APIVersion, creds.ClientID)
+	urlAddr := fmt.Sprintf("https://api.vk.com/method/calls.getAnonymousToken?v=%s&client_id=%s", apiVersion, creds.ClientID)
 
 	cachedSuccessTokenMu.Lock()
 	curToken := cachedSuccessToken
