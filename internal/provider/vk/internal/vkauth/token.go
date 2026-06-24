@@ -73,5 +73,18 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	}
 
 	// Шаг 4: TURN-реквизиты.
-	return c.fetchTurnCreds(ctx, httpClient, profile, streamID, link, token2, sessionKey)
+	user, pass, addresses, err := c.fetchTurnCreds(ctx, httpClient, profile, streamID, link, token2, sessionKey)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	// Шаг 5: подписка на сигнальную очередь (регистрация участника).
+	// Нефатально - TURN-реквизиты уже получены.
+	if queueData, qErr := c.fetchSubscribeToQueue(ctx, httpClient, profile, streamID, token2, apiVersion); qErr != nil {
+		c.log.Warnf("[STREAM %d] [VK Auth] subscribeToQueue failed (non-fatal): %v", streamID, qErr)
+	} else {
+		c.log.Infof("[STREAM %d] [VK Auth] Subscribed to queue: key=%s ts=%s wait=%d", streamID, queueData.Key, queueData.Ts, queueData.Wait)
+	}
+
+	return user, pass, addresses, nil
 }

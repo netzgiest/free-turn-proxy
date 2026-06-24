@@ -17,6 +17,7 @@ import (
 var (
 	chromeHeaderOrder = []string{
 		"host",
+		"dnt",
 		"content-length",
 		"sec-ch-ua-platform",
 		"accept-language",
@@ -35,6 +36,7 @@ var (
 	}
 	firefoxHeaderOrder = []string{
 		"host",
+		"dnt",
 		"content-length",
 		"user-agent",
 		"content-type",

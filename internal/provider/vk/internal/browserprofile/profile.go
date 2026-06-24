@@ -38,15 +38,15 @@ func ForKind(k Kind) Profile {
 	if k == Firefox {
 		return Profile{
 			UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0",
-			AcceptLanguage: "en-US,en;q=0.5",
+			AcceptLanguage: "ru,en;q=0.5",
 		}
 	}
 	return Profile{
-		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-		SecChUa:         `"Not(A:Brand";v="99", "Google Chrome";v="146", "Chromium";v="146"`,
+		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+		SecChUa:         `"Not(A:Brand";v="99", "Google Chrome";v="149", "Chromium";v="149"`,
 		SecChUaMobile:   "?0",
 		SecChUaPlatform: `"Windows"`,
-		AcceptLanguage:  "en-US,en;q=0.9",
+		AcceptLanguage:  "ru,en;q=0.9",
 	}
 }
 
@@ -80,6 +80,7 @@ func Save(sp Saved) error {
 
 func ApplyFhttp(req *fhttp.Request, profile Profile) {
 	req.Header.Set("User-Agent", profile.UserAgent)
+	req.Header.Set("DNT", "1")
 	// sec-ch-ua* - Chromium-only client hints. Для Firefox SecChUa пуст -
 	// заголовки не ставим (UA Firefox + sec-ch-ua = мгновенный флаг).
 	if profile.SecChUa != "" {
