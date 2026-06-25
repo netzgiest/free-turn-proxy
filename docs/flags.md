@@ -57,7 +57,12 @@
   "obf_timing":  "0",
   "debug":       false,
   "clients": {
-    "client-id-1": { "comment": "описание" },
+    "client-id-1": {
+      "comment": "описание",
+      "wg_pub_key": "…",
+      "wg_address": "10.13.13.2",
+      "wg_config": "[Interface]\nPrivateKey = …\n..."
+    },
     "client-id-2": { "comment": "ещё один" }
   }
 }
@@ -80,11 +85,25 @@
 ./server -config /etc/server.json clients add <client_id> ["Комментарий"]
 
 # Удалить клиента
-./server clients remove <client_id>
+./server clients remove|del <client_id>
 
 # Вывести список всех клиентов
 ./server clients list
+
+# Показать freeturn:// ссылку и QR-код для конкретного клиента
+./server clients show <client_id>
 ```
+
+> **При добавлении клиента** (`clients add`) сервер автоматически:
+> 1. Генерирует WireGuard-ключи для этого клиента
+> 2. Добавляет пира в `/etc/wireguard/wg0.conf` (с назначением IP из пула `10.13.13.x`)
+> 3. Применяет изменения в рантайме через `wg set` — **перезапускать WireGuard не нужно**
+> 4. Генерирует персональный WireGuard-конфиг для клиента и встраивает его в `freeturn://` ссылку
+> 5. Выводит `freeturn://` URI и QR-код для передачи клиенту
+>
+> Если `wg` не установлен или конфиг WireGuard не найден, пир не создаётся — клиент всё равно добавляется в allowlist (но без WG-конфига в ссылке).
+>
+> **Важно:** команды `clients add/remove/del/show` работают с `wg` и файлами в `/etc/wireguard/`, поэтому требуют прав root. Т.е systemd юнит сервера должен работать под тем же пользователем, что и wireguard. Если сервер запущен в Docker, команды нужно выполнять **на хосте** (не внутри контейнера), т.к. WireGuard живёт в ядре хоста и недоступен из контейнера.
 
 Без флага `-config` команды по умолчанию работают с файлом `clients.json` в текущей директории. Если вы используете другой путь, задайте его через переменную окружения `CLIENTS_FILE`:
 ```bash
@@ -104,13 +123,63 @@ docker exec -it free-turn-proxy /app/server clients remove "my-client"
 
 # Посмотреть список
 docker exec -it free-turn-proxy /app/server clients list
+
+# Показать ссылку и QR для существующего клиента
+docker exec -it free-turn-proxy /app/server clients show "my-client"
 ```
 
 > **Важно:** команды `docker exec` берут путь к файлу из переменной окружения `CLIENTS_FILE` контейнера. Это работает, только если контейнер запущен с включённой авторизацией (т.е. `CLIENTS_FILE` задан в `docker-compose.yml` и файл проброшен через `volumes`). Если авторизация выключена, `clients` пишет в эфемерный `clients.json` внутри контейнера, который сервер не читает. Путь должен совпадать с тем, что смонтирован и передан в `-clients-file`.
 
+### Управление через systemd
+
+Пример systemd-юнита (бинаррь по умолчанию в `/opt/free-turn-proxy/server`):
+
+```ini
+[Unit]
+Description=Free TURN Proxy Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/free-turn-proxy/server \
+    --listen 0.0.0.0:56000 \
+    --connect 127.0.0.1:51820 \
+    --mode udp \
+    --obf-profile rtpopus \
+    --obf-key "..." \
+    --clients-file /opt/free-turn-proxy/clients.json
+Restart=always
+RestartSec=5
+User=nobody
+Group=nogroup
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Полный пример с комментариями: `docs/server.service.example`.
+
+> **Важно:** сам сервер не требует root (порт 56000 непривилегированный), но CLI-команды `clients add/remove/del/show` — требуют, т.к. обращаются к `wg` и `/etc/wireguard/`. Запускайте их через `sudo`.
+
+### WireGuard-интеграция
+
+При добавлении клиента сервер автоматически создаёт WireGuard-пира. Поведение настраивается через переменные окружения:
+
+| Переменная | По умолчанию | Описание |
+| --- | --- | --- |
+| `WG_CONFIG_PATH` | `/etc/wireguard/wg0.conf` | путь к конфигурации WireGuard-сервера |
+| `WG_INTERFACE` | `wg0` | имя WireGuard-интерфейса |
+| `WG_ENDPOINT` | `127.0.0.1:9000` | endpoint в клиентском WG-конфиге (адрес локального free-turn-proxy client) |
+| `CLIENTS_FILE` | `clients.json` | путь к файлу clients.json для команд `server clients *` без `-config` |
+
+WireGuard-пиры используют подсеть `10.13.13.x/24` (сервер — `.1`, клиенты — `.2`, `.3` и т.д.). При удалении клиента пир автоматически удаляется из конфига и рантайма.
+
 ## QR-код
 
-При запуске сервер выводит QR-код с share link: `freeturn://`-ссылка для подключения (содержит настройки сервера, obf-ключ, client ID и WireGuard-конфиг). Сканируется [Android-приложением](https://github.com/netzgiest/turn-proxy-android) для быстрого импорта.
+При запуске сервер выводит QR-код с share link: `freeturn://`-ссылка для подключения (содержит настройки сервера, obf-ключ, client ID и WireGuard-конфиг). Сканируется [Android-приложением](https://github.com/netzgiest/turn-proxy-android) или аналогичного для быстрого импорта.
 
 Формат: `freeturn://` + `base64url(JSON)`. JSON-схема:
 

@@ -36,6 +36,7 @@
 - **`none`** (default) - обфускация выключена (скорость может быть сильно урезана).
 - **`rtpopus`** - RTP/opus-заголовок + ChaCha20-Poly1305 AEAD на теле. Идеально для обхода шейпов.
 - **`rtpopus2`** - rtpopus + RTP header extension (RFC 8285): X=1, ssrc-audio-level + transport-cc. Ближе к современному WebRTC. Wire несовместим с rtpopus - профиль должен совпадать на обеих сторонах.
+- **`rtpopus3`** - rtpopus2 + abs-send-time, VAD-модель silence/speech, эмуляция потерь (gaps в seq), вариативный шаг timestamp (10/20/40ms), Comfort Noise (PT=13), RED-имитация FEC (PT=127), мульти-SSRC вставки VP8. Пять one-byte extension против двух в rtpopus2: ssrc-audio-level, transport-wide-cc, abs-send-time, MID, video-frame-marking. Наиболее близок к реальному WebRTC-медиатрафику.
 
 Сгенерировать ключ:
 

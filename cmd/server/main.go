@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,8 +15,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,6 +40,300 @@ import (
 
 // version is populated at build time via -ldflags "-X main.version=...".
 var version = "dev"
+
+// WireGuard configuration defaults (override via env)
+const (
+	wgConfPathEnv = "WG_CONFIG_PATH"
+	wgIfaceEnv    = "WG_INTERFACE"
+	wgEndpointEnv = "WG_ENDPOINT"
+
+	defaultWgConf     = "/etc/wireguard/wg0.conf"
+	defaultWgIface    = "wg0"
+	defaultWgEndpoint = "127.0.0.1:9000"
+	wgSubnet          = "10.13.13"
+)
+
+type wgServerConf struct {
+	PrivateKey string
+	PublicKey  string
+	ListenPort string
+}
+
+func getEnvOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func wgExec(args ...string) (string, error) {
+	cmd := exec.Command("wg", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("wg %s: %w", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// wgGenKey generates a WireGuard keypair via wg genkey | wg pubkey
+func wgGenKey() (priv, pub string, err error) {
+	privOut, err := exec.Command("wg", "genkey").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("wg genkey: %w", err)
+	}
+	priv = strings.TrimSpace(string(privOut))
+
+	pubCmd := exec.Command("wg", "pubkey")
+	pubCmd.Stdin = strings.NewReader(priv)
+	pubOut, err := pubCmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("wg pubkey: %w", err)
+	}
+	pub = strings.TrimSpace(string(pubOut))
+	return priv, pub, nil
+}
+
+// deriveWGPubKey derives the public key from a WireGuard private key
+func deriveWGPubKey(privKey string) (string, error) {
+	cmd := exec.Command("wg", "pubkey")
+	cmd.Stdin = strings.NewReader(privKey)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("wg pubkey: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// readWGServerConf parses wg0.conf and extracts server private key + listen port
+func readWGServerConf(path string) (*wgServerConf, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	conf := &wgServerConf{}
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	inInterface := false
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "[Interface]" {
+			inInterface = true
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			inInterface = false
+			continue
+		}
+		if !inInterface {
+			continue
+		}
+		if strings.HasPrefix(line, "PrivateKey") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				conf.PrivateKey = strings.TrimSpace(parts[1])
+			}
+		}
+		if strings.HasPrefix(line, "ListenPort") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				conf.ListenPort = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
+	if conf.PrivateKey != "" {
+		pub, derr := deriveWGPubKey(conf.PrivateKey)
+		if derr == nil {
+			conf.PublicKey = pub
+		}
+	}
+
+	return conf, nil
+}
+
+// wgGetNextAddress scans wg0.conf for the highest used IP in the subnet and returns the next one
+func wgGetNextAddress(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return wgSubnet + ".2", nil
+	}
+
+	maxIP := 1
+	prefix := wgSubnet + "."
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "AllowedIPs") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				ipStr := strings.TrimSpace(parts[1])
+				ipStr = strings.Split(ipStr, "/")[0]
+				if strings.HasPrefix(ipStr, prefix) {
+					lastStr := ipStr[len(prefix):]
+					last, cErr := strconv.Atoi(lastStr)
+					if cErr == nil && last > maxIP {
+						maxIP = last
+					}
+				}
+			}
+		}
+	}
+
+	return wgSubnet + "." + strconv.Itoa(maxIP+1), nil
+}
+
+// wgAddPeerToConf appends a [Peer] section to wg0.conf
+func wgAddPeerToConf(path, pubKey, address, clientID string) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	peerBlock := fmt.Sprintf("\n[Peer]\n# %s\nPublicKey = %s\nAllowedIPs = %s/32\n",
+		clientID, pubKey, address)
+	_, err = f.WriteString(peerBlock)
+	return err
+}
+
+// wgRemovePeerFromConf removes a [Peer] block matching the given public key from wg0.conf
+func wgRemovePeerFromConf(path, pubKey string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var out []string
+	i := 0
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "[Peer]" {
+			match := false
+			for j := i + 1; j < len(lines); j++ {
+				peerLine := strings.TrimSpace(lines[j])
+				if peerLine == "" || strings.HasPrefix(peerLine, "[") {
+					break
+				}
+				if strings.HasPrefix(peerLine, "PublicKey") {
+					parts := strings.SplitN(peerLine, "=", 2)
+					if len(parts) == 2 && strings.TrimSpace(parts[1]) == pubKey {
+						match = true
+					}
+				}
+			}
+			if match {
+				i++
+				for i < len(lines) {
+					peerLine := strings.TrimSpace(lines[i])
+					if peerLine == "" || strings.HasPrefix(peerLine, "[") {
+						break
+					}
+					i++
+				}
+				continue
+			}
+		}
+		out = append(out, lines[i])
+		i++
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0o600)
+}
+
+// generateClientWGConfig builds a WireGuard client config string
+func generateClientWGConfig(clientPrivKey, serverPubKey, address, endpoint string) string {
+	return fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = %s/32
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = %s
+AllowedIPs = 0.0.0.0/0
+Endpoint = %s
+PersistentKeepalive = 25
+`, clientPrivKey, address, serverPubKey, endpoint)
+}
+
+// buildShareURI creates a freeturn:// URI config from server config + client params
+func buildShareURI(cfg *config.Server, clientID, comment, wgConf string) *uri.Config {
+	mode := "udp"
+	if cfg.Proxy.Mode == config.ProxyModeTCPFwd || cfg.Proxy.Mode == config.ProxyModeTCPFwdBond {
+		mode = "tcp"
+	}
+
+	obfProfile := ""
+	obfKey := ""
+	if cfg.Obf.Enabled() {
+		obfProfile = string(cfg.Obf.Profile)
+		obfKey = hex.EncodeToString(cfg.Obf.Key)
+	}
+
+	host, port, _ := net.SplitHostPort(cfg.Proxy.Listen)
+	if host == "0.0.0.0" || host == "::" || host == "" {
+		host = detectPublicIP()
+	}
+	peer := net.JoinHostPort(host, port)
+
+	return &uri.Config{
+		Version:        1,
+		Provider:       "vk",
+		Peer:           peer,
+		Transport:      "tcp",
+		Mode:           mode,
+		ObfProfile:     obfProfile,
+		ObfKey:         obfKey,
+		N:              10,
+		StreamsPerCred: 10,
+		ClientID:       clientID,
+		Listen:         "127.0.0.1:9000",
+		DNSMode:        "auto",
+		Comment:        comment,
+		WgConf:         wgConf,
+	}
+}
+
+// loadServerConfigFromPath attempts to parse a file path as a server config.
+// If the path is empty or the file doesn't have server config fields, returns defaults.
+func loadServerConfigFromPath(path string) *config.Server {
+	if path == "" {
+		return &config.Server{
+			Proxy: config.ProxyOpts{
+				Mode:   config.ProxyModeUDP,
+				Listen: "0.0.0.0:56000",
+			},
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return &config.Server{
+			Proxy: config.ProxyOpts{
+				Mode:   config.ProxyModeUDP,
+				Listen: "0.0.0.0:56000",
+			},
+		}
+	}
+
+	var check struct {
+		Connect string `json:"connect"`
+	}
+	if json.Unmarshal(data, &check) == nil && check.Connect != "" { //nolint:gosec
+		cfg, pErr := config.ParseServerConfigFile(path)
+		if pErr == nil {
+			return cfg
+		}
+	}
+
+	return &config.Server{
+		Proxy: config.ProxyOpts{
+			Mode:   config.ProxyModeUDP,
+			Listen: "0.0.0.0:56000",
+		},
+	}
+}
 
 func main() {
 	// Ищем "clients" среди аргументов — он может быть не на первой позиции (из-за -config).
@@ -187,49 +486,9 @@ func printShareLink(cfg *config.Server, logger logx.Logger) {
 	}
 	clientID := hex.EncodeToString(idBytes)
 
-	mode := "udp"
-	if cfg.Proxy.Mode == config.ProxyModeTCPFwd || cfg.Proxy.Mode == config.ProxyModeTCPFwdBond {
-		mode = "tcp"
-	}
-
-	obfProfile := ""
-	obfKey := ""
-	if cfg.Obf.Enabled() {
-		obfProfile = string(cfg.Obf.Profile)
-		obfKey = hex.EncodeToString(cfg.Obf.Key)
-	}
-
-	host, port, err := net.SplitHostPort(cfg.Proxy.Listen)
-	if err != nil {
-		logger.Errorf("parse listen addr: %v", err)
-		return
-	}
-	if host == "0.0.0.0" || host == "::" || host == "" {
-		host = detectPublicIP()
-		if host == "" {
-			logger.Errorf("detect public IP: no suitable address found")
-			return
-		}
-	}
-	peer := net.JoinHostPort(host, port)
-
 	wgConf := readWGConfig()
 
-	u := &uri.Config{
-		Version:        1,
-		Provider:       "vk",
-		Peer:           peer,
-		Transport:      "tcp",
-		Mode:           mode,
-		ObfProfile:     obfProfile,
-		ObfKey:         obfKey,
-		N:              10,
-		StreamsPerCred: 10,
-		ClientID:       clientID,
-		Listen:         "127.0.0.1:9000",
-		DNSMode:        "auto",
-		WgConf:         wgConf,
-	}
+	u := buildShareURI(cfg, clientID, "", wgConf)
 
 	logger.Infof("Share link: %s", u.String())
 	logger.Infof("Add client to allowlist: %s clients add %s", os.Args[0], clientID)
@@ -401,11 +660,10 @@ func stripConfigFlag(args []string) []string {
 
 func handleClientsCommand(args []string, configPath string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: server clients <add|remove|list> [args...]")
+		fmt.Println("Usage: server clients <add|remove|del|list|show> [args...]")
 		os.Exit(1)
 	}
 
-	// Если указан -config, клиенты хранятся внутри конфига
 	dbPath := configPath
 	if dbPath == "" {
 		dbPath = "clients.json"
@@ -413,7 +671,6 @@ func handleClientsCommand(args []string, configPath string) {
 			dbPath = envPath
 		}
 	} else {
-		// Если config-файла нет, создаём шаблон
 		if _, statErr := os.Stat(dbPath); statErr != nil { //nolint:gosec
 			if errors.Is(statErr, os.ErrNotExist) {
 				dbPath = filepath.Clean(dbPath)
@@ -445,32 +702,152 @@ func handleClientsCommand(args []string, configPath string) {
 		clientID := args[1]
 		comment := ""
 		if len(args) > 2 {
-			comment = args[2]
+			comment = strings.Join(args[2:], " ")
 		}
-		if err := db.Add(clientID, comment); err != nil {
-			fmt.Printf("Failed to add client: %v\n", err)
-			os.Exit(1)
+
+		wgPubKey := ""
+		wgAddress := ""
+		wgClientConf := ""
+		wgErr := ""
+
+		wgConfPath := getEnvOrDefault(wgConfPathEnv, defaultWgConf)
+		wgIface := getEnvOrDefault(wgIfaceEnv, defaultWgIface)
+
+		if _, lookErr := exec.LookPath("wg"); lookErr == nil {
+			if _, statErr := os.Stat(wgConfPath); statErr == nil {
+				srvConf, rErr := readWGServerConf(wgConfPath)
+				if rErr == nil && srvConf.PrivateKey != "" {
+					cliPriv, cliPub, gErr := wgGenKey()
+					if gErr == nil {
+						addr, aErr := wgGetNextAddress(wgConfPath)
+						if aErr == nil {
+							wgPubKey = cliPub
+							wgAddress = addr
+
+							if cErr := wgAddPeerToConf(wgConfPath, cliPub, addr, clientID); cErr == nil {
+								_, _ = wgExec("set", wgIface, "peer", cliPub, "allowed-ips", addr+"/32")
+
+								srvPubKey := srvConf.PublicKey
+								wgEndpoint := getEnvOrDefault(wgEndpointEnv, defaultWgEndpoint)
+								wgClientConf = generateClientWGConfig(cliPriv, srvPubKey, addr, wgEndpoint)
+							} else {
+								wgErr = fmt.Sprintf("add peer to conf: %v", cErr)
+							}
+						} else {
+							wgErr = fmt.Sprintf("next address: %v", aErr)
+						}
+					} else {
+						wgErr = fmt.Sprintf("gen key: %v", gErr)
+					}
+				} else if rErr != nil {
+					wgErr = fmt.Sprintf("read wg conf: %v", rErr)
+				} else {
+					wgErr = "no PrivateKey in wg conf"
+				}
+			} else {
+				wgErr = fmt.Sprintf("wg conf not found: %v", statErr)
+			}
+		} else {
+			wgErr = "wg binary not found in PATH"
 		}
+
+		if wgPubKey != "" {
+			if dErr := db.AddWithWG(clientID, comment, wgPubKey, wgAddress, wgClientConf); dErr != nil {
+				fmt.Printf("Failed to add client: %v\n", dErr)
+				os.Exit(1)
+			}
+		} else {
+			if dErr := db.Add(clientID, comment); dErr != nil {
+				fmt.Printf("Failed to add client: %v\n", dErr)
+				os.Exit(1)
+			}
+		}
+
 		fmt.Printf("Client %s added successfully to %s\n", clientID, dbPath)
-	case "remove":
+		if wgPubKey != "" {
+			fmt.Printf("WireGuard peer created: pubkey=%s address=%s/32\n", wgPubKey, wgAddress)
+		} else {
+			fmt.Printf("WireGuard peer not created: %s\n", wgErr)
+		}
+
+		// Build and print freeturn:// URI + QR
+		svrCfg := loadServerConfigFromPath(configPath)
+		u := buildShareURI(svrCfg, clientID, comment, wgClientConf)
+		fmt.Printf("\nShare link for client %s:\n%s\n", clientID, u.String())
+		printQR("Share link for "+clientID, u.String())
+
+	case "remove", "del":
 		if len(args) < 2 {
 			fmt.Println("Usage: server clients remove <client_id>")
 			os.Exit(1)
 		}
 		clientID := args[1]
+
+		// Look up client info before removing
+		clients := db.List()
+		info, exists := clients[clientID]
+		wgPubKey := ""
+		if exists {
+			wgPubKey = info.WireGuardPubKey
+		}
+
+		if wgPubKey != "" {
+			wgConfPath := getEnvOrDefault(wgConfPathEnv, defaultWgConf)
+			wgIface := getEnvOrDefault(wgIfaceEnv, defaultWgIface)
+
+			if _, lookErr := exec.LookPath("wg"); lookErr == nil {
+				_, _ = wgExec("set", wgIface, "peer", wgPubKey, "remove")
+			}
+
+			if rErr := wgRemovePeerFromConf(wgConfPath, wgPubKey); rErr == nil {
+				fmt.Printf("WireGuard peer %s removed\n", wgPubKey)
+			}
+		}
+
 		if err := db.Remove(clientID); err != nil {
 			fmt.Printf("Failed to remove client: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("Client %s removed successfully from %s\n", clientID, dbPath)
+
 	case "list":
 		clients := db.List()
+		if len(clients) == 0 {
+			fmt.Printf("No clients in %s\n", dbPath)
+			return
+		}
 		fmt.Printf("Found %d clients in %s:\n", len(clients), dbPath)
 		for id, info := range clients {
-			fmt.Printf(" - %s (Comment: %s)\n", id, info.Comment)
+			wgInfo := ""
+			if info.WireGuardPubKey != "" {
+				wgInfo = fmt.Sprintf(" wg_pub=%s addr=%s", info.WireGuardPubKey, info.WireGuardAddress)
+			}
+			fmt.Printf(" - %s (Comment: %s)%s\n", id, info.Comment, wgInfo)
 		}
+
+	case "show":
+		if len(args) < 2 {
+			fmt.Println("Usage: server clients show <client_id>")
+			os.Exit(1)
+		}
+		clientID := args[1]
+		clients := db.List()
+		info, exists := clients[clientID]
+		if !exists {
+			fmt.Printf("Client %s not found in %s\n", clientID, dbPath)
+			os.Exit(1)
+		}
+
+		svrCfg := loadServerConfigFromPath(configPath)
+		wgCfg := info.WireGuardConfig
+
+		u := buildShareURI(svrCfg, clientID, info.Comment, wgCfg)
+		fmt.Printf("\nShare link for client %s:\n%s\n", clientID, u.String())
+		printQR("Share link for "+clientID, u.String())
+
 	default:
 		fmt.Printf("Unknown command: %s\n", cmd)
+		fmt.Println("Usage: server clients <add|remove|del|list|show> [args...]")
 		os.Exit(1)
 	}
 }

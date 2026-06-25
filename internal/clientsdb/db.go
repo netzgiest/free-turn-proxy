@@ -12,7 +12,10 @@ import (
 
 // ClientInfo содержит метаданные о клиенте
 type ClientInfo struct {
-	Comment string `json:"comment,omitempty"`
+	Comment          string `json:"comment,omitempty"`
+	WireGuardPubKey  string `json:"wg_pub_key,omitempty"`
+	WireGuardAddress string `json:"wg_address,omitempty"`
+	WireGuardConfig  string `json:"wg_config,omitempty"` // полный WG client.conf для встраивания в freeturn://
 }
 
 // Data структура JSON-файла
@@ -71,6 +74,20 @@ func (db *DB) Add(clientID, comment string) error {
 	defer db.mu.Unlock()
 
 	db.data.Clients[clientID] = ClientInfo{Comment: comment}
+	return db.save()
+}
+
+// AddWithWG добавляет клиента с WireGuard-данными (pub key + адрес + конфиг)
+func (db *DB) AddWithWG(clientID, comment, wgPubKey, wgAddress, wgConfig string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	db.data.Clients[clientID] = ClientInfo{
+		Comment:          comment,
+		WireGuardPubKey:  wgPubKey,
+		WireGuardAddress: wgAddress,
+		WireGuardConfig:  wgConfig,
+	}
 	return db.save()
 }
 
