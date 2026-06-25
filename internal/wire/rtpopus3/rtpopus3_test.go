@@ -169,11 +169,16 @@ func TestAudioStateMachine(t *testing.T) {
 		markers[i] = buf[1]&rtpMarker != 0
 	}
 
-	// Pkt 0: silence pktsInState=1 (<2, M=0).
-	// Pkt 1: silence pktsInState=2 (==nextStateSwitch) -> speech (M=1).
+	// Pkt 0: silence -> force speech on first packet (VAD synced with traffic) (M=1).
 	t.Logf("markers: %v", markers)
-	if !markers[1] {
-		t.Error("expected M=1 on silence->speech transition at packet index 1")
+	if !markers[0] {
+		t.Error("expected M=1 on silence->speech transition at packet index 0 (VAD sync)")
+	}
+	// No more transitions after first packet (remains in speech).
+	for i := 1; i < len(markers); i++ {
+		if markers[i] {
+			t.Errorf("unexpected M=1 at packet index %d (should stay in speech)", i)
+		}
 	}
 }
 

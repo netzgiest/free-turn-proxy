@@ -89,11 +89,11 @@ func New(cfg Config, solver ManualSolverFunc) (*Provider, error) {
 
 // GetCredentials реализует provider.Provider.
 func (p *Provider) GetCredentials(ctx context.Context, streamID int) (provider.Credentials, error) {
-	user, pass, addrs, err := p.auth.GetCredentials(ctx, p.link, streamID)
+	user, pass, addrs, expiresAt, err := p.auth.GetCredentials(ctx, p.link, streamID)
 	if err != nil {
 		return provider.Credentials{}, err
 	}
-	return provider.Credentials{User: user, Pass: pass, ServerAddrs: addrs}, nil
+	return provider.Credentials{User: user, Pass: pass, ServerAddrs: addrs, ExpiresAt: expiresAt}, nil
 }
 
 // IsAuthError реализует provider.Provider.

@@ -401,8 +401,18 @@ func (c *Conn) WrapInPlace(buf []byte, plainLen int) (int, error) {
 	c.pktCounter++
 	seq := c.computeSeq()
 
-	// --- VAD state transition ---
+	// VAD синхронизация с трафиком: не даём VAD уйти в silence,
+	// пока идут пакеты. pktsInState растёт нормально — видео-всплески
+	// продолжают работать.
 	startedSpeech := c.updateAudioState()
+	if c.audioState == stateSilence {
+		c.audioState = stateSpeech
+		startedSpeech = true
+		c.nextStateSwitch = randPareto(speechMinPkts, speechShape)
+		if c.log != nil {
+			c.log("[VAD] traffic resumed — forced speech")
+		}
+	}
 	isSpeech := c.audioState == stateSpeech
 
 	// Abort video burst early if user stopped talking

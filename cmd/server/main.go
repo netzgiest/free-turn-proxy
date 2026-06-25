@@ -327,10 +327,12 @@ func handleAccepted(ctx context.Context, logger logx.Logger, registry *bondserve
 		logger.Debugf("Client ID received (no allowlist): %s", clientID)
 	}
 
+	// Оборачиваем conn в фильтр, пропускающий DTLS-keepalive (0xFF байты).
 	if cfg.Proxy.Mode == config.ProxyModeTCPFwd {
 		tcpfwdserver.Handle(ctx, logger, registry, dtlsConn, cfg.Proxy.Connect, cfg.KCP.Profile, cfg.KCP.FEC)
 	} else {
-		udpserver.Handle(ctx, logger, conn, cfg.Proxy.Connect)
+		kaFilter := newKeepaliveFilter(dtlsConn, logger)
+		udpserver.Handle(ctx, logger, kaFilter, cfg.Proxy.Connect)
 	}
 
 	logger.Debugf("Connection closed: %s", conn.RemoteAddr())
@@ -345,6 +347,32 @@ func findClientsArg(args []string) int {
 		}
 	}
 	return -1
+}
+
+// keepaliveFilter оборачивает net.Conn и фильтрует DTLS-keepalive (одиночный 0xFF байт)
+// при чтении, не передавая их в data-path. Аналог server-side обработки из amurcanov/proxy-turn-vk-android.
+type keepaliveFilter struct {
+	net.Conn
+	log logx.Logger
+}
+
+func newKeepaliveFilter(inner net.Conn, log logx.Logger) *keepaliveFilter {
+	return &keepaliveFilter{Conn: inner, log: log}
+}
+
+func (f *keepaliveFilter) Read(b []byte) (int, error) {
+	for {
+		n, err := f.Conn.Read(b)
+		if err != nil {
+			return n, err
+		}
+		// Пропускаем одиночный 0xFF — DTLS keepalive от клиента.
+		if n == 1 && b[0] == 0xFF {
+			f.log.Debugf("keepalive: filtered 0xFF from client")
+			continue
+		}
+		return n, nil
+	}
 }
 
 // stripConfigFlag удаляет -config <path> из args (независимо от формы: -config=X или -config X).

@@ -20,6 +20,13 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/shape"
 )
 
+// DTLS keepalive: 0xFF байт каждые 15s для предотвращения server-side EOF
+// (по аналогии с proxy-turn-vk-android/amurcanov).
+const (
+	dtlsKeepaliveInterval = 15 * time.Second
+	dtlsKeepaliveByte     = 0xFF
+)
+
 // DTLSLoop поддерживает единственное DTLS-подключение для streamID, перезапуская
 // его при сбое с backoff 10-30s (пропускается при активном provider-backoff,
 // если предыдущая ошибка - дедлайн). connchan получает свежую половину
@@ -202,11 +209,38 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 				return
 			}
 
+			// Server-side keepalive pong (0xFF байт) - пропускаем.
+			if n == 1 && buf[0] == dtlsKeepaliveByte {
+				continue
+			}
+
 			if peerAddr := deps.ActiveLocalPeer.Load(); peerAddr != nil {
 				if addr, ok := peerAddr.(net.Addr); ok {
 					if _, err := listenConn.WriteTo(buf[:n], addr); err != nil {
 						deps.log().Errorf("[STREAM %d] failed to forward packet to local peer: %v", streamID, err)
 					}
+				}
+			}
+		}
+	})
+
+	// DTLS-keepalive: отправка 0xFF каждые 15s для предотвращения server-side EOF.
+	wg.Go(func() {
+		defer dtlscancel()
+		tick := time.NewTicker(dtlsKeepaliveInterval)
+		defer tick.Stop()
+		ping := []byte{dtlsKeepaliveByte}
+		for {
+			select {
+			case <-dtlsctx.Done():
+				return
+			case <-tick.C:
+				if err := dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					return
+				}
+				if _, err := dtlsConn.Write(ping); err != nil {
+					deps.log().Debugf("[STREAM %d] DTLS keepalive write error: %v", streamID, err)
+					return
 				}
 			}
 		}

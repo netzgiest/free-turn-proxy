@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/transport/turndial"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire"
@@ -17,8 +18,9 @@ import (
 // GetCredsFunc разрешает TURN-реквизиты для streamID. Реализуется provider'ом
 // (см. internal/provider): provider держит идентификатор сессии (link/room/key)
 // внутри, pipeline передаёт только streamID. rawURLs - кандидаты host:port в
-// порядке предпочтения.
-type GetCredsFunc func(ctx context.Context, streamID int) (user, pass string, rawURLs []string, err error)
+// порядке предпочтения. expiresAt - время истечения credentials (zero, если
+// провайдер не поддерживает); turndial использует для make-before-break.
+type GetCredsFunc func(ctx context.Context, streamID int) (user, pass string, rawURLs []string, expiresAt time.Time, err error)
 
 // DialTURN получает реквизиты и открывает TURN-поток, пробуя кандидатов по
 // очереди: если allocate на первом не проходит (DPI-дроп/RST на relay-IP),
@@ -26,7 +28,7 @@ type GetCredsFunc func(ctx context.Context, streamID int) (user, pass string, ra
 // закрытие потока и политику retry при auth-ошибке (udprelay) или перезапуска
 // сессии (tcpfwd).
 func DialTURN(ctx context.Context, host, port string, udp bool, peer *net.UDPAddr, streamID int, getCreds GetCredsFunc) (*turndial.Stream, error) {
-	user, pass, rawURLs, err := getCreds(ctx, streamID)
+	user, pass, rawURLs, expiresAt, err := getCreds(ctx, streamID)
 	if err != nil {
 		return nil, fmt.Errorf("get TURN creds: %w", err)
 	}
@@ -41,9 +43,10 @@ func DialTURN(ctx context.Context, host, port string, udp bool, peer *net.UDPAdd
 	var errs []error
 	for _, rawURL := range rawURLs {
 		stream, derr := turndial.Open(ctx, turndial.Config{
-			HostOverride: host,
-			PortOverride: port,
-			TransportUDP: udp,
+			HostOverride:     host,
+			PortOverride:     port,
+			TransportUDP:     udp,
+			CredentialExpiry: expiresAt,
 		}, peer, user, pass, rawURL)
 		if derr == nil {
 			return stream, nil

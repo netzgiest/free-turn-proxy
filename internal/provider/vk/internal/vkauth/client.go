@@ -76,6 +76,10 @@ type Client struct {
 
 	// minFetchIntervalFn ограничивает частоту запросов к VK. Тесты снижают.
 	minFetchIntervalFn func() time.Duration
+
+	backgroundCtx    context.Context
+	backgroundCancel context.CancelFunc
+	pendingRefreshes sync.Map // cacheID -> chan struct{} (закрывается при завершении)
 }
 
 type tokenChainFn func(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar) (string, string, []string, error)
@@ -105,14 +109,22 @@ func New(cfg Config) *Client {
 	c.minFetchIntervalFn = func() time.Duration {
 		return 3*time.Second + time.Duration(randx.Intn(3000))*time.Millisecond
 	}
+	c.backgroundCtx, c.backgroundCancel = context.WithCancel(context.Background())
 	return c
 }
 
-// GetCredentials возвращает (username, password, server-addrs) для TURN-allocate,
-// обращаясь к VK (с throttle + кэшем) только при необходимости. Адреса отдаются
-// в порядке предпочтения для streamID (предпочтительный первым) - pipeline
-// пробует их по очереди при allocate.
-func (c *Client) GetCredentials(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+// Close отменяет фоновые goroutine обновления credentials.
+// После Close Client непригоден к использованию.
+func (c *Client) Close() {
+	if c.backgroundCancel != nil {
+		c.backgroundCancel()
+	}
+}
+
+// GetCredentials возвращает TURN-реквизиты для streamID, включая ExpiresAt —
+// время истечения credentials (нужно для make-before-break в TURN-аллокации).
+// Адреса отдаются в порядке предпочтения для streamID (предпочтительный первым).
+func (c *Client) GetCredentials(ctx context.Context, link string, streamID int) (user, pass string, addrs []string, expiresAt time.Time, err error) {
 	cache := c.store.Get(streamID)
 	cacheID := c.store.CacheID(streamID)
 
@@ -121,9 +133,13 @@ func (c *Client) GetCredentials(ctx context.Context, link string, streamID int) 
 		expires := time.Until(cache.creds.ExpiresAt)
 		u, p := cache.creds.Username, cache.creds.Password
 		addrs := orderAddrs(cache.creds.ServerAddrs, streamID)
+		expAt := cache.creds.ExpiresAt
 		cache.mutex.RUnlock()
 		c.log.Debugf("[STREAM %d] [VK Auth] Using cached credentials (cache=%d, expires in %v, server=%s)", streamID, cacheID, expires, addrs[0])
-		return u, p, addrs, nil
+		if expires < RefreshLeadTime {
+			c.scheduleRefresh(ctx, cacheID, link)
+		}
+		return u, p, addrs, expAt, nil
 	}
 	cache.mutex.RUnlock()
 
@@ -131,22 +147,28 @@ func (c *Client) GetCredentials(ctx context.Context, link string, streamID int) 
 	defer cache.mutex.Unlock()
 
 	if cache.creds.Link == link && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
-		return cache.creds.Username, cache.creds.Password, orderAddrs(cache.creds.ServerAddrs, streamID), nil
+		expires := time.Until(cache.creds.ExpiresAt)
+		if expires < RefreshLeadTime {
+			c.scheduleRefresh(ctx, cacheID, link)
+		}
+		return cache.creds.Username, cache.creds.Password, orderAddrs(cache.creds.ServerAddrs, streamID), cache.creds.ExpiresAt, nil
 	}
 
-	user, pass, addrs, err := c.fetchSerialized(ctx, link, streamID)
+	user, pass, addrs, err = c.fetchSerialized(ctx, link, streamID)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, time.Time{}, err
 	}
 
+	expiresAt = time.Now().Add(CredentialLifetime - CacheSafetyMargin)
 	cache.creds = TurnCredentials{
 		Username:    user,
 		Password:    pass,
 		ServerAddrs: addrs,
-		ExpiresAt:   time.Now().Add(CredentialLifetime - CacheSafetyMargin),
+		ExpiresAt:   expiresAt,
 		Link:        link,
 	}
-	return user, pass, orderAddrs(addrs, streamID), nil
+	c.scheduleRefresh(ctx, cacheID, link)
+	return user, pass, orderAddrs(addrs, streamID), expiresAt, nil
 }
 
 // orderAddrs возвращает копию addrs, ротированную так, что предпочтительный
@@ -193,6 +215,87 @@ func (c *Client) HandleAuthError(streamID int) bool {
 // ResetErrors обнуляет счётчик ошибок аутентификации (вызывать при успешном allocate).
 func (c *Client) ResetErrors(streamID int) {
 	c.store.Get(streamID).errorCount.Store(0)
+}
+
+// scheduleRefresh запускает фоновую goroutine обновления кэша cacheID
+// перед expiry, чтобы при re-allocate не ждать VK API. Использует
+// backgroundCtx (отменяется при Close). Гарантирует не более одного
+// ожидающего обновления на cacheID через pendingRefreshes.
+func (c *Client) scheduleRefresh(ctx context.Context, cacheID int, link string) {
+	if c.backgroundCtx == nil {
+		return
+	}
+	// Проверяем, нет ли уже активного обновления для этого cacheID.
+	if _, loaded := c.pendingRefreshes.LoadOrStore(cacheID, make(chan struct{})); loaded {
+		return
+	}
+
+	go func() {
+		_ = ctx // caller context, используем backgroundCtx
+		cache := c.store.Get(c.streamIDForCache(cacheID))
+		raw, _ := c.pendingRefreshes.Load(cacheID)
+		done, ok := raw.(chan struct{})
+		if !ok {
+			return
+		}
+		defer close(done)
+		defer c.pendingRefreshes.Delete(cacheID)
+
+		// Ждём до RefreshLeadTime до expiry.
+		cache.mutex.RLock()
+		expiresAt := cache.creds.ExpiresAt
+		cache.mutex.RUnlock()
+
+		wait := time.Until(expiresAt) - RefreshLeadTime
+		if wait <= 0 {
+			wait = 0
+		}
+		select {
+		case <-c.backgroundCtx.Done():
+			return
+		case <-time.After(wait):
+		}
+
+		// Могла произойти инвалидация или другой refresh — проверяем.
+		cache.mutex.RLock()
+		stale := cache.creds.Link != link || time.Now().After(cache.creds.ExpiresAt)
+		cache.mutex.RUnlock()
+		if stale {
+			return
+		}
+
+		streamID := c.store.CacheID(cacheID)*c.store.StreamsPerCache() + 1
+		c.log.Debugf("[VK Auth] Background refresh for cache %d (link=%s)", cacheID, link)
+
+		ctx, cancel := context.WithTimeout(c.backgroundCtx, 30*time.Second)
+		defer cancel()
+
+		//nolint:contextcheck // background goroutine uses its own derived context
+		user, pass, addrs, err := c.fetchSerialized(ctx, link, streamID)
+		if err != nil {
+			c.log.Warnf("[VK Auth] Background refresh failed for cache %d: %v (next fetch will retry)", cacheID, err)
+			return
+		}
+		cache.mutex.Lock()
+		cache.creds = TurnCredentials{
+			Username:    user,
+			Password:    pass,
+			ServerAddrs: addrs,
+			ExpiresAt:   time.Now().Add(CredentialLifetime - CacheSafetyMargin),
+			Link:        link,
+		}
+		cache.mutex.Unlock()
+		c.log.Infof("[VK Auth] Background refresh succeeded for cache %d (new expiry in %v)", cacheID, CredentialLifetime-CacheSafetyMargin)
+
+		// Запланировать следующий refresh для нового expiry.
+		c.scheduleRefresh(c.backgroundCtx, cacheID, link) //nolint:contextcheck
+	}()
+}
+
+// streamIDForCache возвращает streamID, соответствующий cacheID.
+// Используется для логирования и throttle (fetchSerialized).
+func (c *Client) streamIDForCache(cacheID int) int {
+	return cacheID*c.store.StreamsPerCache() + 1
 }
 
 // LockoutUntilUnix возвращает unix-секунду дедлайна глобальной блокировки captcha
