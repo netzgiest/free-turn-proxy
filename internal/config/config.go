@@ -95,6 +95,7 @@ type VKOpts struct {
 	Links          []string // -links (нормализованные join-коды); несколько = больше стримов
 	StreamsPerCred int      // -streams-per-cred
 	ManualCaptcha  bool     // -manual-captcha
+	Manual         bool     // -manual: ручной ввод TURN-creds через хост-приложение (stdin/stdout JSONL)
 	Browser        Browser  // -browser: chrome | firefox
 }
 
@@ -320,6 +321,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	streamsPerCred := fs.Int("streams-per-cred", defaultStreamsPerCache, "TURN-потоков на один кеш VK-creds; только -provider vk")
 	debug := fs.Bool("debug", false, "подробные debug-логи")
 	manualCaptcha := fs.Bool("manual-captcha", false, "ручная VK captcha в браузере вместо авто; только -provider vk")
+	manual := fs.Bool("manual", false, "ручной ввод TURN-creds через хост-приложение (stdin/stdout JSONL); только -provider vk")
 	browser := fs.String("browser", string(BrowserFirefox), "браузерный профиль VK-auth: chrome | firefox; только -provider vk")
 	dnsMode := fs.String("dns-mode", dnsModeAuto, "резолвер клиента: plain | doh | auto")
 	dnsServers := fs.String("dns-servers", "", "свои UDP/53 DNS через запятую: ip[:port][,ip[:port]...]")
@@ -353,6 +355,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 		VK: VKOpts{
 			StreamsPerCred: *streamsPerCred,
 			ManualCaptcha:  *manualCaptcha,
+			Manual:         *manual,
 			Browser:        Browser(*browser),
 		},
 		DNS: DNSOpts{

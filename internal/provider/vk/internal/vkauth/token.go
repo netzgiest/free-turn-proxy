@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	neturl "net/url"
+	"strings"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/browserprofile"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/namegen"
@@ -27,8 +28,8 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 
 	c.log.Infof("[STREAM %d] [VK Auth] Connecting Identity - Name: %s | User-Agent: %s", streamID, name, profile.UserAgent)
 
-	// Шаг 1: анонимный app-токен.
-	token1, err := c.fetchAnonToken(ctx, httpClient, profile, creds)
+	// Шаг 1: анонимный app-токен (scopes — первичный режим).
+	token1, err := c.fetchAnonToken(ctx, httpClient, profile, creds, anonTokenTypeScopes)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -55,7 +56,24 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	// Шаг 2: анонимный call-токен (здесь может сработать captcha).
 	token2, err := c.fetchCallToken(ctx, httpClient, profile, streamID, link, escapedName, token1, creds, apiVersion)
 	if err != nil {
-		return "", "", nil, err
+		// Fallback: если VK отклонил scopes-токен (anonym_token.not_found),
+		// перезапрашиваем анонимный токен с token_type=messages.
+		if strings.Contains(err.Error(), "anonym_token.not_found") {
+			c.log.Warnf("[STREAM %d] [VK Auth] Scopes token rejected (anonym_token.not_found), retrying with token_type=messages", streamID)
+			token1, retryErr := c.fetchAnonToken(ctx, httpClient, profile, creds, anonTokenTypeMessages)
+			if retryErr != nil {
+				return "", "", nil, fmt.Errorf("token_type=messages fallback failed: %w (original: %v)", retryErr, err)
+			}
+			if delayErr := vkDelayRandom(ctx, 100, 150); delayErr != nil {
+				return "", "", nil, delayErr
+			}
+			token2, err = c.fetchCallToken(ctx, httpClient, profile, streamID, link, escapedName, token1, creds, apiVersion)
+			if err != nil {
+				return "", "", nil, fmt.Errorf("token_type=messages fallback also failed: %w", err)
+			}
+		} else {
+			return "", "", nil, err
+		}
 	}
 
 	if delayErr := vkDelayRandom(ctx, 100, 150); delayErr != nil {

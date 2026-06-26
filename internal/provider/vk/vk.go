@@ -32,6 +32,11 @@ type Config struct {
 	// ManualOnly форсирует ручной путь captcha с первой попытки.
 	ManualOnly bool
 
+	// Manual включает ручной ввод TURN-creds через хост-приложение
+	// (stdin/stdout JSONL протокол). VK API не вызывается — провайдер ждёт
+	// creds на stdin.
+	Manual bool
+
 	// Browser - браузерный профиль control-plane: "chrome" | "firefox".
 	// Пустое -> firefox (дефолт продукта).
 	Browser string
@@ -58,9 +63,11 @@ type Config struct {
 type ManualSolverFunc = vkauth.ManualSolveFunc
 
 // Provider реализует provider.Provider через vkauth.Client + сохранённый link.
+// При Manual=true использует stdin/stdout JSONL-протокол вместо VK API.
 type Provider struct {
-	link string
-	auth *vkauth.Client
+	link   string
+	auth   *vkauth.Client
+	manual *manualProvider // non-nil в manual-режиме
 }
 
 // New создаёт VK-провайдер. solver - функция ручного решения captcha
@@ -68,6 +75,10 @@ type Provider struct {
 func New(cfg Config, solver ManualSolverFunc) (*Provider, error) {
 	if cfg.Link == "" {
 		return nil, fmt.Errorf("vk: empty Link")
+	}
+	if cfg.Manual {
+		mp := newManualProvider(cfg.Link, cfg.Log)
+		return &Provider{link: cfg.Link, manual: mp}, nil
 	}
 	// captcha-пакеты - internal/ для provider/vk, поэтому подключаем
 	// логгер здесь, а не в cmd/client.
@@ -89,6 +100,9 @@ func New(cfg Config, solver ManualSolverFunc) (*Provider, error) {
 
 // GetCredentials реализует provider.Provider.
 func (p *Provider) GetCredentials(ctx context.Context, streamID int) (provider.Credentials, error) {
+	if p.manual != nil {
+		return p.manual.getCredentials(ctx)
+	}
 	user, pass, addrs, expiresAt, err := p.auth.GetCredentials(ctx, p.link, streamID)
 	if err != nil {
 		return provider.Credentials{}, err
@@ -97,16 +111,36 @@ func (p *Provider) GetCredentials(ctx context.Context, streamID int) (provider.C
 }
 
 // IsAuthError реализует provider.Provider.
-func (p *Provider) IsAuthError(err error) bool { return p.auth.IsAuthError(err) }
+func (p *Provider) IsAuthError(err error) bool {
+	if p.manual != nil {
+		return p.manual.isAuthError(err)
+	}
+	return p.auth.IsAuthError(err)
+}
 
 // HandleAuthError реализует provider.Provider.
-func (p *Provider) HandleAuthError(streamID int) bool { return p.auth.HandleAuthError(streamID) }
+func (p *Provider) HandleAuthError(streamID int) bool {
+	if p.manual != nil {
+		return p.manual.handleAuthError()
+	}
+	return p.auth.HandleAuthError(streamID)
+}
 
 // ResetErrors реализует provider.Provider.
-func (p *Provider) ResetErrors(streamID int) { p.auth.ResetErrors(streamID) }
+func (p *Provider) ResetErrors(streamID int) {
+	if p.manual != nil {
+		return
+	}
+	p.auth.ResetErrors(streamID)
+}
 
 // BackoffUntilUnix реализует provider.Provider.
-func (p *Provider) BackoffUntilUnix() int64 { return p.auth.BackoffUntilUnix() }
+func (p *Provider) BackoffUntilUnix() int64 {
+	if p.manual != nil {
+		return 0
+	}
+	return p.auth.BackoffUntilUnix()
+}
 
 // Name реализует provider.Provider.
 func (*Provider) Name() string { return "vk" }

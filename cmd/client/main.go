@@ -199,6 +199,7 @@ func buildProvider(cfg *config.Client, dialer net.Dialer, connected *atomic.Int3
 			return vk.New(vk.Config{
 				Link:            link,
 				Dialer:          dialer,
+				Manual:          cfg.VK.Manual,
 				ManualOnly:      cfg.VK.ManualCaptcha,
 				Browser:         string(cfg.VK.Browser),
 				StreamsPerCache: cfg.VK.StreamsPerCred,
