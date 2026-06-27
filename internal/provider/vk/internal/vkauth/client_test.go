@@ -84,7 +84,7 @@ func TestStoreCacheGrouping(t *testing.T) {
 func TestHandleAuthErrorInvalidatesAtThreshold(t *testing.T) {
 	t.Parallel()
 
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		return "u", "p", []string{"a:1"}, nil
 	})
 
@@ -110,7 +110,7 @@ func TestFetchFallsBackThroughCredentialsList(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, creds VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, creds VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		calls.Add(1)
 		if creds.ClientID != "c" {
 			return "", "", nil, fmt.Errorf("Rate limit hit for %s", creds.ClientID)
@@ -125,8 +125,8 @@ func TestFetchFallsBackThroughCredentialsList(t *testing.T) {
 	if u != "user-c" || p != "pass-c" || len(addr) != 1 || addr[0] != "server-c:443" {
 		t.Fatalf("unexpected creds: u=%q p=%q addr=%v", u, p, addr)
 	}
-	if calls.Load() != 3 {
-		t.Errorf("expected to walk all 3 creds, called %d times", calls.Load())
+	if calls.Load() != 5 {
+		t.Errorf("expected to walk all 3 creds × 2 domains (fail a.ru, a.com, b.ru, b.com, succeed c.ru), called %d times", calls.Load())
 	}
 }
 
@@ -134,7 +134,7 @@ func TestFetchShortCircuitsOnCaptchaWait(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		calls.Add(1)
 		return "", "", nil, ErrCaptchaWaitRequired
 	})
@@ -152,7 +152,7 @@ func TestGetCredentialsCacheHit(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		calls.Add(1)
 		return "u", "p", []string{"a:1", "b:2"}, nil
 	})
@@ -186,7 +186,7 @@ func TestGetCredentialsCacheHit(t *testing.T) {
 func TestLockoutBlocksFetch(t *testing.T) {
 	t.Parallel()
 
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		t.Fatal("tokenChain must not be called while lockout is active")
 		return "", "", nil, nil
 	})
@@ -204,7 +204,7 @@ func TestLockoutBlocksFetch(t *testing.T) {
 func TestThrottleHonorsContextCancel(t *testing.T) {
 	t.Parallel()
 
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		return "u", "p", []string{"a:1"}, nil
 	})
 	// Force throttle to wait long enough that ctx-cancel wins.

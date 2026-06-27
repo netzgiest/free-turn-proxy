@@ -16,11 +16,12 @@ const (
 )
 
 // fetchAnonToken - шаг 1 цепочки: обменивает app client_id/client_secret
-// на анонимный access token из login.vk.ru.
+// на анонимный access token через login.{vk.ru,vk.com}.
 // Параметр tokenType управляет форматом запроса: anonTokenTypeScopes (по умолчанию,
 // scopes=...) или anonTokenTypeMessages (token_type=messages — fallback для VK,
 // когда scopes-токен даёт anonym_token.not_found в calls.getAnonymousToken).
-func (c *Client) fetchAnonToken(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, creds VKCredentials, tokenType string) (string, error) {
+// domain определяет login.vk.ru или login.vk.com.
+func (c *Client) fetchAnonToken(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, creds VKCredentials, tokenType string, dom domainSet) (string, error) {
 	var data string
 	switch tokenType {
 	case anonTokenTypeMessages:
@@ -30,7 +31,7 @@ func (c *Client) fetchAnonToken(ctx context.Context, httpClient tlsclient.HttpCl
 		data = fmt.Sprintf("client_secret=%s&client_id=%s&scopes=audio_anonymous,video_anonymous,photos_anonymous,profile_anonymous&isApiOauthAnonymEnabled=false&version=1&app_id=%s",
 			creds.ClientSecret, creds.ClientID, creds.ClientID)
 	}
-	resp, err := c.doRequest(ctx, httpClient, profile, data, "https://login.vk.com/?act=get_anonym_token")
+	resp, err := c.doRequest(ctx, httpClient, profile, data, "https://"+dom.LoginDomain+"/?act=get_anonym_token", dom)
 	if err != nil {
 		return "", err
 	}

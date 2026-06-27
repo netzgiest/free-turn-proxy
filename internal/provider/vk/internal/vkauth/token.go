@@ -15,7 +15,8 @@ import (
 // getTokenChain выполняет 4-шаговый обмен токенами VK для одной пары client_id/secret
 // и возвращает тройку TURN-allocate. Ошибки captcha запускают настроенную цепочку
 // auto/manual solver.
-func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar) (string, string, []string, error) {
+// dom определяет набор доменов (vk.ru или vk.com).
+func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar, dom domainSet) (string, string, []string, error) {
 	profile := browserprofile.ForKind(c.browser)
 
 	httpClient, err := c.newTLSClient(jar)
@@ -26,10 +27,10 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	name := namegen.Generate()
 	escapedName := neturl.QueryEscape(name)
 
-	c.log.Infof("[STREAM %d] [VK Auth] Connecting Identity - Name: %s | User-Agent: %s", streamID, name, profile.UserAgent)
+	c.log.Infof("[STREAM %d] [VK Auth] Connecting Identity - Name: %s | User-Agent: %s | Domain: %s", streamID, name, profile.UserAgent, dom.WebDomain)
 
 	// Шаг 1: анонимный app-токен (scopes — первичный режим).
-	token1, err := c.fetchAnonToken(ctx, httpClient, profile, creds, anonTokenTypeScopes)
+	token1, err := c.fetchAnonToken(ctx, httpClient, profile, creds, anonTokenTypeScopes, dom)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -38,14 +39,14 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 		return "", "", nil, delayErr
 	}
 
-	apiVersion := getAPIVersion(ctx, link, httpClient, profile, func(format string, args ...any) {
+	apiVersion := getAPIVersion(ctx, link, httpClient, profile, dom, func(format string, args ...any) {
 		c.log.Infof("[STREAM %d] "+format, append([]any{streamID}, args...)...)
 	})
 
 	// Шаг 1a: прогрев getCallPreview (не критично).
-	previewData := fmt.Sprintf("vk_join_link=https://vk.ru/call/join/%s&fields=photo_200&access_token=%s", link, token1)
+	previewData := fmt.Sprintf("vk_join_link=https://"+dom.WebDomain+"/call/join/%s&fields=photo_200&access_token=%s", link, token1)
 	if _, prevErr := c.doRequest(ctx, httpClient, profile, previewData,
-		"https://api.vk.com/method/calls.getCallPreview?v="+apiVersion+"&client_id="+creds.ClientID); prevErr != nil {
+		"https://"+dom.APIDomain+"/method/calls.getCallPreview?v="+apiVersion+"&client_id="+creds.ClientID, dom); prevErr != nil {
 		c.log.Warnf("[STREAM %d] [VK Auth] getCallPreview failed: %v", streamID, prevErr)
 	}
 
@@ -54,20 +55,20 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	}
 
 	// Шаг 2: анонимный call-токен (здесь может сработать captcha).
-	token2, err := c.fetchCallToken(ctx, httpClient, profile, streamID, link, escapedName, token1, creds, apiVersion)
+	token2, err := c.fetchCallToken(ctx, httpClient, profile, streamID, link, escapedName, token1, creds, apiVersion, dom)
 	if err != nil {
 		// Fallback: если VK отклонил scopes-токен (anonym_token.not_found),
 		// перезапрашиваем анонимный токен с token_type=messages.
 		if strings.Contains(err.Error(), "anonym_token.not_found") {
 			c.log.Warnf("[STREAM %d] [VK Auth] Scopes token rejected (anonym_token.not_found), retrying with token_type=messages", streamID)
-			token1, retryErr := c.fetchAnonToken(ctx, httpClient, profile, creds, anonTokenTypeMessages)
+			token1, retryErr := c.fetchAnonToken(ctx, httpClient, profile, creds, anonTokenTypeMessages, dom)
 			if retryErr != nil {
 				return "", "", nil, fmt.Errorf("token_type=messages fallback failed: %w (original: %v)", retryErr, err)
 			}
 			if delayErr := vkDelayRandom(ctx, 100, 150); delayErr != nil {
 				return "", "", nil, delayErr
 			}
-			token2, err = c.fetchCallToken(ctx, httpClient, profile, streamID, link, escapedName, token1, creds, apiVersion)
+			token2, err = c.fetchCallToken(ctx, httpClient, profile, streamID, link, escapedName, token1, creds, apiVersion, dom)
 			if err != nil {
 				return "", "", nil, fmt.Errorf("token_type=messages fallback also failed: %w", err)
 			}
@@ -81,7 +82,7 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	}
 
 	// Шаг 3: ok.ru session_key.
-	sessionKey, err := c.fetchOkRuSession(ctx, httpClient, profile)
+	sessionKey, err := c.fetchOkRuSession(ctx, httpClient, profile, dom)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -91,7 +92,7 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	}
 
 	// Шаг 4: TURN-реквизиты.
-	user, pass, addresses, convToken, err := c.fetchTurnCreds(ctx, httpClient, profile, streamID, link, token2, sessionKey)
+	user, pass, addresses, convToken, err := c.fetchTurnCreds(ctx, httpClient, profile, streamID, link, token2, sessionKey, dom)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -101,7 +102,7 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	// Нефатально - TURN-реквизиты уже получены.
 	if convToken == "" {
 		c.log.Warnf("[STREAM %d] [VK Auth] subscribeToQueue skipped: no conversation token in response", streamID)
-	} else if queueData, qErr := c.fetchSubscribeToQueue(ctx, httpClient, profile, streamID, convToken, apiVersion); qErr != nil {
+	} else if queueData, qErr := c.fetchSubscribeToQueue(ctx, httpClient, profile, streamID, convToken, apiVersion, dom); qErr != nil {
 		c.log.Warnf("[STREAM %d] [VK Auth] subscribeToQueue failed (non-fatal): %v", streamID, qErr)
 	} else {
 		c.log.Infof("[STREAM %d] [VK Auth] Subscribed to queue: key=%s ts=%s wait=%d", streamID, queueData.Key, queueData.Ts, queueData.Wait)

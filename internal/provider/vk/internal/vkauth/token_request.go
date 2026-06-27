@@ -54,23 +54,24 @@ var (
 
 // doRequest отправляет POST form-запрос по url через tls-клиент с браузерным
 // профилем и десериализует JSON-тело ответа.
-func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, data, url string) (map[string]any, error) {
+// domainSet определяет Origin/Referer (vk.ru или vk.com).
+func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, data, url string, dom domainSet) (map[string]any, error) {
 	parsedURL, err := neturl.Parse(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse request URL: %w", err)
 	}
-	domain := parsedURL.Hostname()
+	reqDomain := parsedURL.Hostname()
 
 	req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer([]byte(data)))
 	if err != nil {
 		return nil, err
 	}
-	req.Host = domain
+	req.Host = reqDomain
 	browserprofile.ApplyFhttp(req, profile)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Origin", "https://vk.com")
-	req.Header.Set("Referer", "https://vk.com/")
+	req.Header.Set("Origin", "https://"+dom.WebDomain)
+	req.Header.Set("Referer", "https://"+dom.WebDomain+"/")
 	req.Header.Set("Sec-Fetch-Site", "same-site")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Dest", "empty")

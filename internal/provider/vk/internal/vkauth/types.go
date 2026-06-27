@@ -67,3 +67,25 @@ var (
 	ErrFatalCaptchaNoStreams = errors.Join(provider.ErrFatalNoStreams, errors.New("FATAL_CAPTCHA_FAILED_NO_STREAMS"))
 	ErrLockoutActive         = errors.New("global lockout active")
 )
+
+// domainSet содержит домены для одного варианта VK API (vk.ru или vk.com).
+// Перебор начинается с DomainVkRu; если все credentials упали с сетевой
+// ошибкой, переходим на DomainVkCom.
+type domainSet struct {
+	LoginDomain string
+	APIDomain   string
+	WebDomain   string
+}
+
+var (
+	DomainVkRu = domainSet{
+		LoginDomain: "login.vk.ru",
+		APIDomain:   "api.vk.ru",
+		WebDomain:   "vk.ru",
+	}
+	DomainVkCom = domainSet{
+		LoginDomain: "login.vk.com",
+		APIDomain:   "api.vk.com",
+		WebDomain:   "vk.com",
+	}
+)

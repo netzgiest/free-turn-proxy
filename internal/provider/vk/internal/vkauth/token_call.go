@@ -21,6 +21,7 @@ var (
 
 // fetchCallToken - шаг 2 цепочки: вызывает calls.getAnonymousToken и ведёт
 // цикл retry captcha до получения call-токена или исчерпания всех режимов решения.
+// domain определяет api.vk.ru/api.vk.com и vk.ru/vk.com в join link.
 func (c *Client) fetchCallToken(
 	ctx context.Context,
 	httpClient tlsclient.HttpClient,
@@ -29,20 +30,21 @@ func (c *Client) fetchCallToken(
 	link, escapedName, token1 string,
 	creds VKCredentials,
 	apiVersion string,
+	dom domainSet,
 ) (string, error) {
-	urlAddr := fmt.Sprintf("https://api.vk.com/method/calls.getAnonymousToken?v=%s&client_id=%s", apiVersion, creds.ClientID)
+	urlAddr := fmt.Sprintf("https://"+dom.APIDomain+"/method/calls.getAnonymousToken?v=%s&client_id=%s", apiVersion, creds.ClientID)
 
 	cachedSuccessTokenMu.Lock()
 	curToken := cachedSuccessToken
 	cachedSuccessTokenMu.Unlock()
-	data := fmt.Sprintf("vk_join_link=https://vk.ru/call/join/%s&name=%s&access_token=%s",
+	data := fmt.Sprintf("vk_join_link=https://"+dom.WebDomain+"/call/join/%s&name=%s&access_token=%s",
 		link, escapedName, token1)
 	if curToken != "" {
 		data += "&success_token=" + neturl.QueryEscape(curToken)
 	}
 
 	for attempt := 0; ; attempt++ {
-		resp, err := c.doRequest(ctx, httpClient, profile, data, urlAddr)
+		resp, err := c.doRequest(ctx, httpClient, profile, data, urlAddr, dom)
 		if err != nil {
 			return "", err
 		}
@@ -50,7 +52,7 @@ func (c *Client) fetchCallToken(
 		if errObj, hasErr := resp["error"].(map[string]any); hasErr {
 			captchaErr := captcha.ParseError(errObj)
 			if captchaErr != nil && captchaErr.IsCaptcha() {
-				retryData, err := c.solveCaptcha(ctx, httpClient, profile, streamID, attempt, link, escapedName, token1, captchaErr)
+				retryData, err := c.solveCaptcha(ctx, httpClient, profile, streamID, attempt, link, escapedName, token1, captchaErr, dom)
 				if err != nil {
 					return "", err
 				}
@@ -81,6 +83,7 @@ func (c *Client) solveCaptcha(
 	streamID, attempt int,
 	link, escapedName, token1 string,
 	captchaErr *captcha.Error,
+	dom domainSet,
 ) (retryData string, err error) {
 	solveMode, hasSolveMode := CaptchaSolveModeForAttempt(attempt, c.manualOnly)
 	if !hasSolveMode {
@@ -172,7 +175,7 @@ func (c *Client) solveCaptcha(
 		if hasNextSolveMode {
 			c.log.Infof("[STREAM %d] [Captcha] Falling back to %s",
 				streamID, CaptchaSolveModeLabel(nextSolveMode))
-			return buildCaptchaRetryData(link, escapedName, token1, captchaErr, "", captchaKey), nil
+			return buildCaptchaRetryData(link, escapedName, token1, captchaErr, "", captchaKey, dom), nil
 		}
 		c.engageLockout(60 * time.Second)
 		if c.streamsFn() == 0 {
@@ -185,25 +188,27 @@ func (c *Client) solveCaptcha(
 	if captchaErr.CaptchaAttempt == "0" || captchaErr.CaptchaAttempt == "" {
 		captchaErr.CaptchaAttempt = "1"
 	}
-	return buildCaptchaRetryData(link, escapedName, token1, captchaErr, successToken, captchaKey), nil
+	return buildCaptchaRetryData(link, escapedName, token1, captchaErr, successToken, captchaKey, dom), nil
 }
 
 // buildCaptchaRetryData формирует тело POST для следующей попытки captcha.
-func buildCaptchaRetryData(link, escapedName, token1 string, captchaErr *captcha.Error, successToken, captchaKey string) string {
+// dom определяет vk.ru или vk.com в vk_join_link.
+func buildCaptchaRetryData(link, escapedName, token1 string, captchaErr *captcha.Error, successToken, captchaKey string, dom domainSet) string {
+	joinLink := "https://" + dom.WebDomain + "/call/join/%s"
 	if captchaErr.CaptchaSid == "" {
 		return fmt.Sprintf(
-			"vk_join_link=https://vk.ru/call/join/%s&name=%s&success_token=%s&access_token=%s",
+			"vk_join_link="+joinLink+"&name=%s&success_token=%s&access_token=%s",
 			link, escapedName, neturl.QueryEscape(successToken), token1,
 		)
 	}
 	if captchaKey != "" {
 		return fmt.Sprintf(
-			"vk_join_link=https://vk.ru/call/join/%s&name=%s&captcha_key=%s&captcha_sid=%s&access_token=%s",
+			"vk_join_link="+joinLink+"&name=%s&captcha_key=%s&captcha_sid=%s&access_token=%s",
 			link, escapedName, neturl.QueryEscape(captchaKey), captchaErr.CaptchaSid, token1,
 		)
 	}
 	return fmt.Sprintf(
-		"vk_join_link=https://vk.ru/call/join/%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
+		"vk_join_link="+joinLink+"&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
 		link, escapedName, captchaErr.CaptchaSid, neturl.QueryEscape(successToken),
 		captchaErr.CaptchaTs, captchaErr.CaptchaAttempt, token1,
 	)

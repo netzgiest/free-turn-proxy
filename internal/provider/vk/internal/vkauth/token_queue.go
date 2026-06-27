@@ -24,11 +24,12 @@ func (c *Client) fetchSubscribeToQueue(
 	profile browserprofile.Profile,
 	streamID int,
 	token2, apiVersion string,
+	dom domainSet,
 ) (*subscribeToQueueData, error) {
-	urlAddr := fmt.Sprintf("https://api.vk.com/method/calls.subscribeToQueue?v=%s", apiVersion)
+	urlAddr := fmt.Sprintf("https://"+dom.APIDomain+"/method/calls.subscribeToQueue?v=%s", apiVersion)
 	data := fmt.Sprintf("access_token=%s&wait=25", token2)
 
-	resp, err := c.doRequest(ctx, httpClient, profile, data, urlAddr)
+	resp, err := c.doRequest(ctx, httpClient, profile, data, urlAddr, dom)
 	if err != nil {
 		return nil, err
 	}

@@ -82,7 +82,7 @@ type Client struct {
 	pendingRefreshes sync.Map // cacheID -> chan struct{} (закрывается при завершении)
 }
 
-type tokenChainFn func(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar) (string, string, []string, error)
+type tokenChainFn func(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar, dom domainSet) (string, string, []string, error)
 
 func New(cfg Config) *Client {
 	c := &Client{
@@ -341,7 +341,12 @@ func (c *Client) fetchSerialized(ctx context.Context, link string, streamID int)
 	return c.fetch(ctx, link, streamID)
 }
 
+// domainOrder определяет порядок перебора доменов для каждого credentials.
+// Сначала пробуем vk.ru (исторически стабильный), при сетевой ошибке — vk.com.
+var domainOrder = []domainSet{DomainVkRu, DomainVkCom}
+
 // fetch перебирает c.credentials, возвращая первый успех или терминальную ошибку.
+// Для каждого credentials сначала пробует DomainVkRu, затем DomainVkCom.
 func (c *Client) fetch(ctx context.Context, link string, streamID int) (string, string, []string, error) {
 	if time.Now().Unix() < c.lockout.Load() {
 		return "", "", nil, fmt.Errorf("%w: %w", ErrCaptchaWaitRequired, ErrLockoutActive)
@@ -350,22 +355,24 @@ func (c *Client) fetch(ctx context.Context, link string, streamID int) (string, 
 	var lastErr error
 	jar := tlsclient.NewCookieJar()
 	for _, creds := range c.credentials {
-		c.log.Infof("[STREAM %d] [VK Auth] Trying credentials: client_id=%s", streamID, creds.ClientID)
+		for _, dom := range domainOrder {
+			c.log.Infof("[STREAM %d] [VK Auth] Trying credentials: client_id=%s domain=%s", streamID, creds.ClientID, dom.WebDomain)
 
-		user, pass, addrs, err := c.tokenChain(ctx, link, streamID, creds, jar)
-		if err == nil {
-			c.log.Infof("[STREAM %d] [VK Auth] Success with client_id=%s", streamID, creds.ClientID)
-			return user, pass, addrs, nil
-		}
-		lastErr = err
-		c.log.Warnf("[STREAM %d] [VK Auth] Failed with client_id=%s: %v", streamID, creds.ClientID, err)
+			user, pass, addrs, err := c.tokenChain(ctx, link, streamID, creds, jar, dom)
+			if err == nil {
+				c.log.Infof("[STREAM %d] [VK Auth] Success with client_id=%s domain=%s", streamID, creds.ClientID, dom.WebDomain)
+				return user, pass, addrs, nil
+			}
+			lastErr = err
+			c.log.Warnf("[STREAM %d] [VK Auth] Failed with client_id=%s domain=%s: %v", streamID, creds.ClientID, dom.WebDomain, err)
 
-		if errors.Is(err, ErrCaptchaWaitRequired) || errors.Is(err, ErrFatalCaptchaNoStreams) {
-			return "", "", nil, err
-		}
-		es := err.Error()
-		if strings.Contains(es, "error_code:29") || strings.Contains(es, "error_code: 29") || strings.Contains(es, "Rate limit") {
-			c.log.Warnf("[STREAM %d] [VK Auth] Rate limit detected, trying next credentials", streamID)
+			if errors.Is(err, ErrCaptchaWaitRequired) || errors.Is(err, ErrFatalCaptchaNoStreams) {
+				return "", "", nil, err
+			}
+			es := err.Error()
+			if strings.Contains(es, "error_code:29") || strings.Contains(es, "error_code: 29") || strings.Contains(es, "Rate limit") {
+				c.log.Warnf("[STREAM %d] [VK Auth] Rate limit detected, trying next credentials/domain", streamID)
+			}
 		}
 	}
 	return "", "", nil, fmt.Errorf("all VK credentials failed: %w", lastErr)
