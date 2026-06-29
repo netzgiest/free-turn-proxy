@@ -49,23 +49,32 @@ func (d *splitDialer) DialContext(ctx context.Context, network, addr string) (ne
 	}, nil
 }
 
-// clientProfile выбирает TLS/HTTP2-профиль (JA3 + client hints) под браузер.
-// JA3 обязан совпадать с UA из browserprofile.ForKind, иначе рассинхрон = флаг.
-func (c *Client) clientProfile() profiles.ClientProfile {
-	if c.browser == browserprofile.Firefox {
+// clientProfileForKind выбирает TLS/HTTP2-профиль (JA3 + client hints) под
+// браузер. JA3 обязан совпадать с UA из browserprofile.ForKind, иначе
+// рассинхрон = флаг.
+func clientProfileForKind(kind browserprofile.Kind) profiles.ClientProfile {
+	switch kind {
+	case browserprofile.Firefox:
 		return profiles.Firefox_147
+	case browserprofile.Safari:
+		return profiles.Safari_16_0
+	case browserprofile.Opera:
+		return profiles.Opera_91
+	default: // Chrome
+		return profiles.Chrome_146
 	}
-	return profiles.Chrome_146
 }
 
-// newTLSClient строит tls-client с Chrome-fingerprint и фрагментацией
-// ClientHello на всех исходящих control-plane TLS-соединениях. Базовый дилер -
-// c.dialer (несёт DNS-резолвер dnsdial); фабрика вызывается без proxyUrl, поэтому
-// CONNECT не используется - splitDialer работает как прямой транспорт.
-func (c *Client) newTLSClient(jar tlsclient.CookieJar) (tlsclient.HttpClient, error) {
+// newTLSClientForBrowser строит tls-client с указанным JA3-профилем браузера
+// и фрагментацией ClientHello на всех исходящих control-plane TLS-соединениях.
+// Базовый дилер - c.dialer (несёт DNS-резолвер dnsdial); фабрика вызывается без
+// proxyUrl, поэтому CONNECT не используется - splitDialer работает как прямой
+// транспорт. Нужно при randBrowser=true — каждая сессия использует свой
+// JA3-профиль.
+func (c *Client) newTLSClientForBrowser(jar tlsclient.CookieJar, kind browserprofile.Kind) (tlsclient.HttpClient, error) {
 	return tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
 		tlsclient.WithTimeoutSeconds(20),
-		tlsclient.WithClientProfile(c.clientProfile()),
+		tlsclient.WithClientProfile(clientProfileForKind(kind)),
 		tlsclient.WithCookieJar(jar),
 		tlsclient.WithProxyDialerFactory(func(_ string, timeout time.Duration, localAddr *net.TCPAddr, _ fhttp.Header, _ tlsclient.Logger) (proxy.ContextDialer, error) {
 			base := c.dialer

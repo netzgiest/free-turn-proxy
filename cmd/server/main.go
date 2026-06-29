@@ -66,24 +66,32 @@ func getEnvOrDefault(key, def string) string {
 	return def
 }
 
-func wgExec(args ...string) (string, error) {
-	cmd := exec.Command("wg", args...)
+func wgExec(args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "wg", args...)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("wg %s: %w", strings.Join(args, " "), err)
+		return fmt.Errorf("wg %s: %w", strings.Join(args, " "), err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	_ = out
+	return nil
 }
 
 // wgGenKey generates a WireGuard keypair via wg genkey | wg pubkey
 func wgGenKey() (priv, pub string, err error) {
-	privOut, err := exec.Command("wg", "genkey").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	privOut, err := exec.CommandContext(ctx, "wg", "genkey").Output()
 	if err != nil {
 		return "", "", fmt.Errorf("wg genkey: %w", err)
 	}
 	priv = strings.TrimSpace(string(privOut))
 
-	pubCmd := exec.Command("wg", "pubkey")
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+	pubCmd := exec.CommandContext(ctx2, "wg", "pubkey")
 	pubCmd.Stdin = strings.NewReader(priv)
 	pubOut, err := pubCmd.Output()
 	if err != nil {
@@ -95,7 +103,9 @@ func wgGenKey() (priv, pub string, err error) {
 
 // deriveWGPubKey derives the public key from a WireGuard private key
 func deriveWGPubKey(privKey string) (string, error) {
-	cmd := exec.Command("wg", "pubkey")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "wg", "pubkey")
 	cmd.Stdin = strings.NewReader(privKey)
 	out, err := cmd.Output()
 	if err != nil {
@@ -152,11 +162,12 @@ func readWGServerConf(path string) (*wgServerConf, error) {
 	return conf, nil
 }
 
-// wgGetNextAddress scans wg0.conf for the highest used IP in the subnet and returns the next one
-func wgGetNextAddress(path string) (string, error) {
+// wgGetNextAddress scans wg0.conf for the highest used IP in the subnet and returns the next one.
+// If the file doesn't exist, returns the default first address.
+func wgGetNextAddress(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return wgSubnet + ".2", nil
+		return wgSubnet + ".2"
 	}
 
 	maxIP := 1
@@ -180,7 +191,7 @@ func wgGetNextAddress(path string) (string, error) {
 		}
 	}
 
-	return wgSubnet + "." + strconv.Itoa(maxIP+1), nil
+	return wgSubnet + "." + strconv.Itoa(maxIP+1)
 }
 
 // wgAddPeerToConf appends a [Peer] section to wg0.conf
@@ -189,7 +200,7 @@ func wgAddPeerToConf(path, pubKey, address, clientID string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	peerBlock := fmt.Sprintf("\n[Peer]\n# %s\nPublicKey = %s\nAllowedIPs = %s/32\n",
 		clientID, pubKey, address)
@@ -239,7 +250,7 @@ func wgRemovePeerFromConf(path, pubKey string) error {
 		i++
 	}
 
-	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0o600)
+	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0o600) //nolint:gosec // path from wgConfPath env/flag
 }
 
 // generateClientWGConfig builds a WireGuard client config string
@@ -307,7 +318,7 @@ func loadServerConfigFromPath(path string) *config.Server {
 		}
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path from config flag
 	if err != nil {
 		return &config.Server{
 			Proxy: config.ProxyOpts{
@@ -713,42 +724,37 @@ func handleClientsCommand(args []string, configPath string) {
 		wgConfPath := getEnvOrDefault(wgConfPathEnv, defaultWgConf)
 		wgIface := getEnvOrDefault(wgIfaceEnv, defaultWgIface)
 
-		if _, lookErr := exec.LookPath("wg"); lookErr == nil {
-			if _, statErr := os.Stat(wgConfPath); statErr == nil {
-				srvConf, rErr := readWGServerConf(wgConfPath)
-				if rErr == nil && srvConf.PrivateKey != "" {
-					cliPriv, cliPub, gErr := wgGenKey()
-					if gErr == nil {
-						addr, aErr := wgGetNextAddress(wgConfPath)
-						if aErr == nil {
-							wgPubKey = cliPub
-							wgAddress = addr
-
-							if cErr := wgAddPeerToConf(wgConfPath, cliPub, addr, clientID); cErr == nil {
-								_, _ = wgExec("set", wgIface, "peer", cliPub, "allowed-ips", addr+"/32")
-
-								srvPubKey := srvConf.PublicKey
-								wgEndpoint := getEnvOrDefault(wgEndpointEnv, defaultWgEndpoint)
-								wgClientConf = generateClientWGConfig(cliPriv, srvPubKey, addr, wgEndpoint)
-							} else {
-								wgErr = fmt.Sprintf("add peer to conf: %v", cErr)
-							}
-						} else {
-							wgErr = fmt.Sprintf("next address: %v", aErr)
-						}
-					} else {
-						wgErr = fmt.Sprintf("gen key: %v", gErr)
-					}
-				} else if rErr != nil {
-					wgErr = fmt.Sprintf("read wg conf: %v", rErr)
-				} else {
-					wgErr = "no PrivateKey in wg conf"
-				}
-			} else {
-				wgErr = fmt.Sprintf("wg conf not found: %v", statErr)
-			}
-		} else {
+		if _, lookErr := exec.LookPath("wg"); lookErr != nil {
 			wgErr = "wg binary not found in PATH"
+		} else if _, statErr := os.Stat(wgConfPath); statErr != nil {
+			wgErr = fmt.Sprintf("wg conf not found: %v", statErr)
+		} else {
+			srvConf, rErr := readWGServerConf(wgConfPath)
+			switch {
+			case rErr != nil:
+				wgErr = fmt.Sprintf("read wg conf: %v", rErr)
+			case srvConf.PrivateKey == "":
+				wgErr = "no PrivateKey in wg conf"
+			default:
+				cliPriv, cliPub, gErr := wgGenKey()
+				if gErr != nil {
+					wgErr = fmt.Sprintf("gen key: %v", gErr)
+				} else {
+					addr := wgGetNextAddress(wgConfPath)
+					wgPubKey = cliPub
+					wgAddress = addr
+
+					if cErr := wgAddPeerToConf(wgConfPath, cliPub, addr, clientID); cErr != nil {
+						wgErr = fmt.Sprintf("add peer to conf: %v", cErr)
+					} else {
+						_ = wgExec("set", wgIface, "peer", cliPub, "allowed-ips", addr+"/32")
+
+						srvPubKey := srvConf.PublicKey
+						wgEndpoint := getEnvOrDefault(wgEndpointEnv, defaultWgEndpoint)
+						wgClientConf = generateClientWGConfig(cliPriv, srvPubKey, addr, wgEndpoint)
+					}
+				}
+			}
 		}
 
 		if wgPubKey != "" {
@@ -796,7 +802,7 @@ func handleClientsCommand(args []string, configPath string) {
 			wgIface := getEnvOrDefault(wgIfaceEnv, defaultWgIface)
 
 			if _, lookErr := exec.LookPath("wg"); lookErr == nil {
-				_, _ = wgExec("set", wgIface, "peer", wgPubKey, "remove")
+				_ = wgExec("set", wgIface, "peer", wgPubKey, "remove")
 			}
 
 			if rErr := wgRemovePeerFromConf(wgConfPath, wgPubKey); rErr == nil {

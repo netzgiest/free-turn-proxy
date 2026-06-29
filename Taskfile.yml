@@ -27,6 +27,14 @@ tasks:
     cmds:
       - goreleaser release --snapshot --clean --skip=publish,sign
 
+  build:my:
+    desc: Build linux/amd64 (client+server) and android/arm64 (client .so)
+    cmds:
+      - cmd: mkdir -p dist/linux-amd64 dist/android-arm64
+      - cmd: GOOS=linux GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -trimpath -o dist/linux-amd64/client ./cmd/client
+      - cmd: GOOS=linux GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -trimpath -o dist/linux-amd64/server ./cmd/server
+      - cmd: GOOS=android GOARCH=arm64 go build -ldflags "{{.LDFLAGS}}" -trimpath -o dist/android-arm64/libfreeturn.so ./cmd/client
+
   test:
     desc: Run unit tests with race detector
     cmds:

@@ -46,6 +46,10 @@ type Config struct {
 	// Нулевое значение -> Firefox (KindFromString("") -> Firefox).
 	Browser browserprofile.Kind
 
+	// RandBrowser включает случайный выбор браузера для каждой сессии.
+	// При RandBrowser=true Browser игнорируется.
+	RandBrowser bool
+
 	// Log - уровневый логгер. nil -> no-op.
 	Log logx.Logger
 }
@@ -58,6 +62,7 @@ type Client struct {
 	dialer      net.Dialer
 	manualOnly  bool
 	browser     browserprofile.Kind
+	randBrowser bool
 	streamsFn   func() int32
 	autoSolver  AutoSolveFunc
 	manualSolve ManualSolveFunc
@@ -90,6 +95,7 @@ func New(cfg Config) *Client {
 		dialer:      cfg.Dialer,
 		manualOnly:  cfg.ManualOnly,
 		browser:     cfg.Browser,
+		randBrowser: cfg.RandBrowser,
 		streamsFn:   cfg.StreamsAlive,
 		autoSolver:  cfg.AutoSolver,
 		manualSolve: cfg.ManualSolver,
@@ -132,7 +138,7 @@ func (c *Client) GetCredentials(ctx context.Context, link string, streamID int) 
 	if cache.creds.Link == link && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
 		expires := time.Until(cache.creds.ExpiresAt)
 		u, p := cache.creds.Username, cache.creds.Password
-		addrs := orderAddrs(cache.creds.ServerAddrs, streamID)
+		addrs = orderAddrs(cache.creds.ServerAddrs, streamID)
 		expAt := cache.creds.ExpiresAt
 		cache.mutex.RUnlock()
 		c.log.Debugf("[STREAM %d] [VK Auth] Using cached credentials (cache=%d, expires in %v, server=%s)", streamID, cacheID, expires, addrs[0])
@@ -311,6 +317,15 @@ func (c *Client) BackoffUntilUnix() int64 { return c.LockoutUntilUnix() }
 
 // Name реализует provider.Provider.
 func (*Client) Name() string { return "vk" }
+
+// pickBrowser возвращает браузер для текущей сессии. При randBrowser=true
+// каждая сессия получает случайный браузер. Иначе — фиксированный cfg.Browser.
+func (c *Client) pickBrowser() browserprofile.Kind {
+	if c.randBrowser {
+		return browserprofile.RandomKind()
+	}
+	return c.browser
+}
 
 // IsAuthError оборачивает пакетный IsAuthError как метод для работы через интерфейс.
 func (*Client) IsAuthError(err error) bool { return IsAuthError(err) }

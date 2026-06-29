@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 
+	"github.com/samosvalishe/free-turn-proxy/internal/randx"
+
 	fhttp "github.com/bogdanfinn/fhttp"
 )
 
@@ -13,15 +15,34 @@ type Kind string
 const (
 	Chrome  Kind = "chrome"
 	Firefox Kind = "firefox"
+	Safari  Kind = "safari"
+	Opera   Kind = "opera"
 )
 
-// KindFromString мапит строку флага -browser в Kind. Пустое/неизвестное -
-// Firefox (текущий дефолт продукта).
+// allKinds возвращает все доступные браузеры для случайного выбора.
+func allKinds() []Kind { return []Kind{Chrome, Firefox, Safari, Opera} }
+
+// KindFromString мапит строку флага -browser в Kind. Пустое/неизвестное
+// и "random" возвращают RandomKind.
 func KindFromString(s string) Kind {
-	if s == string(Chrome) {
+	switch s {
+	case string(Chrome):
 		return Chrome
+	case string(Firefox):
+		return Firefox
+	case string(Safari):
+		return Safari
+	case string(Opera):
+		return Opera
+	default:
+		return RandomKind()
 	}
-	return Firefox
+}
+
+// RandomKind возвращает равновероятно один из всех доступных браузеров.
+func RandomKind() Kind {
+	kinds := allKinds()
+	return kinds[randx.Intn(len(kinds))]
 }
 
 type Profile struct {
@@ -33,20 +54,35 @@ type Profile struct {
 }
 
 // ForKind возвращает канонический профиль для браузера. JA3 (см.
-// vkauth.clientProfile) обязан совпадать с UA отсюда, иначе рассинхрон = флаг.
+// vkauth.clientProfileForKind) обязан совпадать с UA отсюда, иначе рассинхрон = флаг.
 func ForKind(k Kind) Profile {
-	if k == Firefox {
+	switch k {
+	case Firefox:
 		return Profile{
 			UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0",
 			AcceptLanguage: "ru,en;q=0.5",
 		}
-	}
-	return Profile{
-		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
-		SecChUa:         `"Not(A:Brand";v="99", "Google Chrome";v="149", "Chromium";v="149"`,
-		SecChUaMobile:   "?0",
-		SecChUaPlatform: `"Windows"`,
-		AcceptLanguage:  "ru,en;q=0.9",
+	case Safari:
+		return Profile{
+			UserAgent:      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
+			AcceptLanguage: "ru,en;q=0.9",
+		}
+	case Opera:
+		return Profile{
+			UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 OPR/130.0.0.0",
+			SecChUa:         `"Not(A:Brand";v="99", "Opera";v="130", "Chromium";v="149"`,
+			SecChUaMobile:   "?0",
+			SecChUaPlatform: `"Windows"`,
+			AcceptLanguage:  "ru,en;q=0.9",
+		}
+	default: // Chrome
+		return Profile{
+			UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+			SecChUa:         `"Not(A:Brand";v="99", "Google Chrome";v="149", "Chromium";v="149"`,
+			SecChUaMobile:   "?0",
+			SecChUaPlatform: `"Windows"`,
+			AcceptLanguage:  "ru,en;q=0.9",
+		}
 	}
 }
 

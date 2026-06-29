@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 package rtpopus3
 
 import (
@@ -52,6 +54,8 @@ type Listener struct {
 	logf  Logf
 }
 
+// SetLogf устанавливает колбэк для отладочного логирования VAD/видео/RTCP.
+// Пробрасывается в каждый новый Conn, создаваемый Accept.
 func (l *Listener) SetLogf(logf Logf) { l.logf = logf }
 
 func (l *Listener) Accept() (net.PacketConn, net.Addr, error) {
@@ -78,6 +82,8 @@ func isRTCP(b []byte) bool {
 	return len(b) >= 8 && (b[0]&0xC0) == 0x80 && b[1] >= 200 && b[1] <= 207
 }
 
+// rtcpPTName возвращает строковое имя RTCP-типа пакета по PT.
+// Используется в отладочном логировании при пропуске RTCP.
 func rtcpPTName(pt byte) string {
 	switch pt {
 	case 200:

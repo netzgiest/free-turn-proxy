@@ -17,9 +17,10 @@ import (
 // auto/manual solver.
 // dom определяет набор доменов (vk.ru или vk.com).
 func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar, dom domainSet) (string, string, []string, error) {
-	profile := browserprofile.ForKind(c.browser)
+	browser := c.pickBrowser()
+	profile := browserprofile.ForKind(browser)
 
-	httpClient, err := c.newTLSClient(jar)
+	httpClient, err := c.newTLSClientForBrowser(jar, browser)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to initialize tls_client: %w", err)
 	}
@@ -92,20 +93,9 @@ func (c *Client) getTokenChain(ctx context.Context, link string, streamID int, c
 	}
 
 	// Шаг 4: TURN-реквизиты.
-	user, pass, addresses, convToken, err := c.fetchTurnCreds(ctx, httpClient, profile, streamID, link, token2, sessionKey, dom)
+	user, pass, addresses, err := c.fetchTurnCreds(ctx, httpClient, profile, streamID, link, token2, sessionKey, dom)
 	if err != nil {
 		return "", "", nil, err
-	}
-
-	// Шаг 5: подписка на сигнальную очередь (регистрация участника).
-	// Используем conversation token из ответа vchat.joinConversationByLink.
-	// Нефатально - TURN-реквизиты уже получены.
-	if convToken == "" {
-		c.log.Warnf("[STREAM %d] [VK Auth] subscribeToQueue skipped: no conversation token in response", streamID)
-	} else if queueData, qErr := c.fetchSubscribeToQueue(ctx, httpClient, profile, streamID, convToken, apiVersion, dom); qErr != nil {
-		c.log.Warnf("[STREAM %d] [VK Auth] subscribeToQueue failed (non-fatal): %v", streamID, qErr)
-	} else {
-		c.log.Infof("[STREAM %d] [VK Auth] Subscribed to queue: key=%s ts=%s wait=%d", streamID, queueData.Key, queueData.Ts, queueData.Wait)
 	}
 
 	return user, pass, addresses, nil

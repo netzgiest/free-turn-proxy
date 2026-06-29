@@ -11,7 +11,7 @@ import (
 )
 
 // fetchTurnCreds - шаг 4 цепочки: вызывает vchat.joinConversationByLink
-// и извлекает TURN username, credential, список адресов и conversation token из ответа.
+// и извлекает TURN username, credential и список адресов из ответа.
 func (c *Client) fetchTurnCreds(
 	ctx context.Context,
 	httpClient tlsclient.HttpClient,
@@ -19,35 +19,33 @@ func (c *Client) fetchTurnCreds(
 	streamID int,
 	link, token2, sessionKey string,
 	dom domainSet,
-) (user, pass string, addresses []string, convToken string, err error) {
+) (user, pass string, addresses []string, err error) {
 	data := fmt.Sprintf(
 		"joinLink=%s&isVideo=false&protocolVersion=5&capabilities=2F7F&anonymToken=%s&method=vchat.joinConversationByLink&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
 		link, token2, sessionKey,
 	)
 	resp, err := c.doRequest(ctx, httpClient, profile, data, "https://calls.okcdn.ru/fb.do", dom)
 	if err != nil {
-		return "", "", nil, "", err
+		return "", "", nil, err
 	}
 	c.log.Debugf("[STREAM %d] [VK Auth] vchat.joinConversationByLink response: %v", streamID, resp)
 
 	tsRaw, ok := resp["turn_server"].(map[string]any)
 	if !ok {
-		return "", "", nil, "", fmt.Errorf("missing turn_server in response: %v", resp)
+		return "", "", nil, fmt.Errorf("missing turn_server in response: %v", resp)
 	}
 	user, ok = tsRaw["username"].(string)
 	if !ok {
-		return "", "", nil, "", fmt.Errorf("missing username in turn_server")
+		return "", "", nil, fmt.Errorf("missing username in turn_server")
 	}
 	pass, ok = tsRaw["credential"].(string)
 	if !ok {
-		return "", "", nil, "", fmt.Errorf("missing credential in turn_server")
+		return "", "", nil, fmt.Errorf("missing credential in turn_server")
 	}
 	urlsRaw, ok := tsRaw["urls"].([]any)
 	if !ok || len(urlsRaw) == 0 {
-		return "", "", nil, "", fmt.Errorf("missing or empty urls in turn_server")
+		return "", "", nil, fmt.Errorf("missing or empty urls in turn_server")
 	}
-
-	convToken, _ = resp["token"].(string)
 
 	c.log.Infof("[STREAM %d] [VK Auth] TURN urls (%d total):", streamID, len(urlsRaw))
 	for i, u := range urlsRaw {
@@ -64,7 +62,7 @@ func (c *Client) fetchTurnCreds(
 		addresses = append(addresses, address)
 	}
 	if len(addresses) == 0 {
-		return "", "", nil, "", fmt.Errorf("no valid TURN addresses found")
+		return "", "", nil, fmt.Errorf("no valid TURN addresses found")
 	}
-	return user, pass, addresses, convToken, nil
+	return user, pass, addresses, nil
 }

@@ -37,8 +37,9 @@ type Config struct {
 	// creds на stdin.
 	Manual bool
 
-	// Browser - браузерный профиль control-plane: "chrome" | "firefox".
-	// Пустое -> firefox (дефолт продукта).
+	// Browser - браузерный профиль control-plane: "chrome" | "firefox" | "random".
+	// Пустое -> firefox (дефолт продукта). "random" включает случайный выбор
+	// браузера для каждой сессии.
 	Browser string
 
 	// StreamsPerCache - делитель streamID -> cacheID. <=0 -> дефолт (10).
@@ -85,11 +86,22 @@ func New(cfg Config, solver ManualSolverFunc) (*Provider, error) {
 	captcha.SetLogger(cfg.Log)
 	manualcaptcha.SetLogger(cfg.Log)
 	manualcaptcha.Debug = cfg.Debug
+	browserKind := browserprofile.KindFromString(cfg.Browser)
+	// Если пользователь указал конкретный браузер — фиксированный профиль.
+	// При "random" или любом неизвестном значении — случайный выбор на сессию.
+	randBrowser := cfg.Browser != string(browserprofile.Chrome) &&
+		cfg.Browser != string(browserprofile.Firefox) &&
+		cfg.Browser != string(browserprofile.Safari) &&
+		cfg.Browser != string(browserprofile.Opera)
+	if randBrowser {
+		browserKind = browserprofile.Firefox // fallback, не используется при RandBrowser=true
+	}
 	auth := vkauth.New(vkauth.Config{
 		Credentials:     cfg.Credentials,
 		Dialer:          cfg.Dialer,
 		ManualOnly:      cfg.ManualOnly,
-		Browser:         browserprofile.KindFromString(cfg.Browser),
+		Browser:         browserKind,
+		RandBrowser:     randBrowser,
 		StreamsPerCache: cfg.StreamsPerCache,
 		StreamsAlive:    cfg.StreamsAlive,
 		ManualSolver:    solver,

@@ -239,7 +239,7 @@ func (p *manualProvider) wait(ctx context.Context, w *authWaiter) (provider.Cred
 	}
 }
 
-func (p *manualProvider) isAuthError(err error) bool {
+func (*manualProvider) isAuthError(err error) bool {
 	return err != nil
 }
 
