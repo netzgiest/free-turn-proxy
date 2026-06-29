@@ -46,7 +46,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -246,14 +245,6 @@ func (*Conn) MaxWire(n int) int { return MaxWire(n) }
 
 // SetLogf устанавливает колбэк для отладочного логирования.
 func (c *Conn) SetLogf(logf Logf) { c.log = logf }
-
-func (c *Conn) SetVideoInterval(packets int) {
-	if packets < 1 {
-		packets = 6000
-	}
-	c.videoInterval = packets
-	c.nextVideoBurst = c.pktCounter + uint64(packets)
-}
 
 func randInt(n int) int {
 	if n <= 0 {
@@ -656,27 +647,4 @@ func (c *Conn) UnwrapInPlace(wire []byte) ([]byte, error) {
 	return plain, nil
 }
 
-func GenKeyHex() (string, error) {
-	key := make([]byte, KeyLen)
-	if _, err := rand.Read(key); err != nil {
-		return "", fmt.Errorf("rtpopus3:key gen: %w", err)
-	}
-	return hex.EncodeToString(key), nil
-}
 
-func DecodeKey(enabled bool, raw string) ([]byte, error) {
-	if !enabled {
-		return nil, nil
-	}
-	if raw == "" {
-		return nil, errors.New("-obf-profile != none requires -obf-key")
-	}
-	key, err := hex.DecodeString(raw)
-	if err != nil {
-		return nil, fmt.Errorf("-obf-key invalid hex: %w", err)
-	}
-	if len(key) != KeyLen {
-		return nil, fmt.Errorf("-obf-key must decode to %d bytes (got %d)", KeyLen, len(key))
-	}
-	return key, nil
-}

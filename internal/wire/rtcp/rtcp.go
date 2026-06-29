@@ -178,13 +178,4 @@ func GenerateCNAME() []byte {
 	return b
 }
 
-// hexEncode — вспомогательная для тестов; дублирует hex.EncodeToString.
-func hexEncode(b []byte) string {
-	const hex = "0123456789abcdef"
-	out := make([]byte, len(b)*2)
-	for i, v := range b {
-		out[i*2] = hex[v>>4]
-		out[i*2+1] = hex[v&0x0f]
-	}
-	return string(out)
-}
+

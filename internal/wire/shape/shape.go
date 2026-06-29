@@ -1,15 +1,10 @@
 // Package shape реализует packet pacing для RTP-мимикрии:
-// задержка между отправкой пакетов + случайный jitter.
+// задержка между отправкой пакетов + случайный uniform jitter.
 // Оборачивает net.PacketConn, вставляя sleep перед каждым WriteTo.
 // Совместим с любой стороной — пакеты те же, только медленнее.
-//
-// Поддерживает два режима jitter:
-//   - Uniform (±10%): стандартный, как в v1/v2 (rate=1.0)
-//   - Gaussian: более естественное распределение задержек (rate=2.0)
 package shape
 
 import (
-	"math"
 	"net"
 	"time"
 
@@ -18,55 +13,20 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
 )
 
-// JitterModel определяет распределение случайной добавки к задержке.
-type JitterModel int
-
-const (
-	JitterUniform  JitterModel = iota // ±rate% от interval (0..2*rate*interval)
-	JitterGaussian                    // гауссово распределение с sigma = rate*interval/3
-)
-
 // Shaper управляет межпакетной задержкой.
 type Shaper struct {
-	interval  time.Duration
-	lastSend  time.Time
-	model     JitterModel
-	jitterPct float64 // доля interval для jitter (0.1 = ±10%)
-	burst     int     // осталось пакетов в текущем burst (0 = не в burst)
-	burstMax  int     // макс. пакетов в burst
+	interval time.Duration
+	lastSend time.Time
+	burst    int // осталось пакетов в текущем burst (0 = не в burst)
+	burstMax int // макс. пакетов в burst
 }
 
 // New создаёт Shaper. interval=0 отключает pacing.
 func New(interval time.Duration) *Shaper {
 	return &Shaper{
-		interval:  interval,
-		model:     JitterUniform,
-		jitterPct: 0.10,
-		burstMax:  3,
+		interval: interval,
+		burstMax: 3,
 	}
-}
-
-// SetJitterModel меняет модель jitter.
-func (s *Shaper) SetJitterModel(m JitterModel) { s.model = m }
-
-// SetJitterPct задаёт долю interval для jitter (0.0-0.5).
-func (s *Shaper) SetJitterPct(pct float64) {
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 0.5 {
-		pct = 0.5
-	}
-	s.jitterPct = pct
-}
-
-// SetBurst ограничивает макс. число пакетов без задержки (WebRTC-подобные мини-батчи).
-// 0 = отключено (каждый пакет с задержкой).
-func (s *Shaper) SetBurst(max int) {
-	if max < 0 {
-		max = 0
-	}
-	s.burstMax = max
 }
 
 // Wait блокируется до момента, когда можно отправить следующий пакет.
@@ -97,22 +57,10 @@ func (s *Shaper) Wait() {
 		return
 	}
 
-	switch s.model {
-	case JitterUniform:
-		jitter := time.Duration(float64(s.interval) * s.jitterPct)
-		if jitter > 0 {
-			wait += time.Duration(randx.Intn(int(jitter)*2+1)) - jitter
-		}
-	case JitterGaussian:
-		// Гауссов jitter: box-muller из uniform(0,1).
-		sigma := float64(s.interval) * s.jitterPct / 3.0
-		u1 := float64(randx.Intn(1<<31-1)) / (1 << 31)
-		u2 := float64(randx.Intn(1<<31-1)) / (1 << 31)
-		if u1 < 1e-15 {
-			u1 = 1e-15
-		}
-		z := math.Sqrt(-2*math.Log(u1)) * math.Cos(2*math.Pi*u2)
-		wait += time.Duration(z * sigma)
+	// Uniform jitter: ±10% от interval.
+	jitter := time.Duration(float64(s.interval) * 0.10)
+	if jitter > 0 {
+		wait += time.Duration(randx.Intn(int(jitter)*2+1)) - jitter
 	}
 	if wait < 0 {
 		wait = 0

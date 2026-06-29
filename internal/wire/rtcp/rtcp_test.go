@@ -108,6 +108,16 @@ func TestHexEncode(t *testing.T) {
 	}
 }
 
+func hexEncode(b []byte) string {
+	const hex = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, v := range b {
+		out[i*2] = hex[v>>4]
+		out[i*2+1] = hex[v&0x0f]
+	}
+	return string(out)
+}
+
 func TestNTPTime(t *testing.T) {
 	t.Parallel()
 	sec, frac := ntpTime(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
