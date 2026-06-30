@@ -34,7 +34,9 @@ func DefaultAutoSolve(
 	if sp, err := browserprofile.Load(); err == nil {
 		log.Infof("[STREAM %d] [Captcha] Using saved real browser profile", streamID)
 		savedProfile = sp
-		profile = sp.Profile
+		// Не заменяем profile (User-Agent, sec-ch-ua, Accept-Language) сохранённым,
+		// иначе JA3-рукопожатие Firefox + заголовки Chrome Mobile = BOT от VK.
+		// Сохранённый профиль даёт только DeviceJSON + BrowserFp внутри captcha.Solve.
 	}
 
 	successToken, err := captcha.Solve(ctx, captchaErr, streamID, client, profile, savedProfile, log)

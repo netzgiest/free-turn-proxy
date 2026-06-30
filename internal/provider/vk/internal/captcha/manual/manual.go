@@ -68,9 +68,12 @@ func localCaptchaHosts() []string {
 
 func isAllowedProxyHost(hostname string) bool {
 	allowed := []string{
-		".vk.ru", ".vk.ru", ".vkontakte.ru",
+		".vk.ru", ".vkontakte.ru",
+		".vk.com",
 		".userapi.com", ".okcdn.ru", ".mycdn.me",
 		".api.vk.ru",
+		".static.vk.ru",
+		".mail.ru",
 	}
 	for _, suffix := range allowed {
 		if strings.HasSuffix(hostname, suffix) || hostname == suffix[1:] {
