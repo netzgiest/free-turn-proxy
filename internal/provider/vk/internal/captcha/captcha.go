@@ -89,8 +89,9 @@ type captchaInitData struct {
 }
 
 type captchaInitSetting struct {
-	Type     string `json:"type"`
-	Settings string `json:"settings"`
+	Type         string `json:"type"`
+	Settings     string `json:"settings"`
+	SettingsKey  string `json:"settings_key"`
 }
 
 type captchaPage struct {
@@ -189,7 +190,10 @@ func (s *captchaSession) solveOnce(captchaErr *Error) (string, error) {
 	if page.Init != nil {
 		for _, setting := range page.Init.Data.CaptchaSettings {
 			if setting.Type == "slider" {
-				sliderSettings = setting.Settings
+				sliderSettings = setting.SettingsKey
+				if sliderSettings == "" {
+					sliderSettings = setting.Settings
+				}
 			}
 		}
 	}
@@ -543,6 +547,15 @@ func (s *captchaSession) doRaw(
 	req.Header[fhttp.HeaderOrderKey] = captchaHeaderOrder
 	req.Header[fhttp.PHeaderOrderKey] = captchaPHeaderOrder
 
+	if s.logger().DebugEnabled() {
+		bodyStr := string(body)
+		if len(bodyStr) > 500 {
+			bodyStr = bodyStr[:500] + "..."
+		}
+		s.logger().Debugf("[Captcha] >>> %s %s body=%s", method, endpoint, bodyStr)
+	}
+
+	start := time.Now()
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -552,7 +565,21 @@ func (s *captchaSession) doRaw(
 			s.logger().Warnf("[Captcha] close body: %s", closeErr)
 		}
 	}()
-	return io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
+	elapsed := time.Since(start)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.logger().DebugEnabled() {
+		bodyStr := string(body)
+		if len(bodyStr) > 2000 {
+			bodyStr = bodyStr[:2000] + "..."
+		}
+		s.logger().Debugf("[Captcha] <<< %s %s (%dms) status=%d body=%s", method, endpoint, elapsed.Milliseconds(), resp.StatusCode, bodyStr)
+	}
+
+	return body, nil
 }
 
 func captchaEncodeForm(values [][2]string) string {

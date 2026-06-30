@@ -369,11 +369,18 @@ func (c *Client) fetch(ctx context.Context, link string, streamID int) (string, 
 
 	var lastErr error
 	jar := tlsclient.NewCookieJar()
+	if c.log.DebugEnabled() {
+		c.log.Debugf("[STREAM %d] [VK Auth] Starting credential chain for link=%s, %d credentials, %d domains", streamID, link, len(c.credentials), len(domainOrder))
+	}
 	for _, creds := range c.credentials {
 		for _, dom := range domainOrder {
 			c.log.Infof("[STREAM %d] [VK Auth] Trying credentials: client_id=%s domain=%s", streamID, creds.ClientID, dom.WebDomain)
 
+			chainStart := time.Now()
 			user, pass, addrs, err := c.tokenChain(ctx, link, streamID, creds, jar, dom)
+			if c.log.DebugEnabled() {
+				c.log.Debugf("[STREAM %d] [VK Auth] Token chain took %dms", streamID, time.Since(chainStart).Milliseconds())
+			}
 			if err == nil {
 				c.log.Infof("[STREAM %d] [VK Auth] Success with client_id=%s domain=%s", streamID, creds.ClientID, dom.WebDomain)
 				return user, pass, addrs, nil

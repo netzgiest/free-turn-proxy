@@ -53,11 +53,13 @@ func (s *captchaSession) solveSliderCaptcha(
 
 	resp, err := s.captchaRequest("captchaNotRobot.getContent", values)
 	if err != nil {
-		return "", fmt.Errorf("slider getContent failed: %w", err)
+		s.logger().Debugf("[Captcha] slider getContent request failed, trying checkbox fallback: %v", err)
+		return s.solveCheckboxCaptcha(sessionToken, browserFP, hash, debugInfo)
 	}
 	puzzle, err := parseSliderPuzzle(resp)
 	if err != nil {
-		return "", err
+		s.logger().Debugf("[Captcha] slider puzzle parse failed, trying checkbox fallback: %v", err)
+		return s.solveCheckboxCaptcha(sessionToken, browserFP, hash, debugInfo)
 	}
 	Log.Debugf("[Captcha] slider puzzle decoded: grid=%d attempts=%d swaps=%d", puzzle.Size, puzzle.Attempts, len(puzzle.Swaps))
 
@@ -130,7 +132,12 @@ func parseSliderPuzzle(raw map[string]any) (*sliderPuzzle, error) {
 	}
 	status := captchaStringifyAny(resp["status"])
 	if !strings.EqualFold(status, "ok") {
-		return nil, fmt.Errorf("slider getContent status: %s", status)
+		errMsg := captchaStringifyAny(resp["error"])
+		extra := ""
+		if errMsg != "" {
+			extra = ": " + errMsg
+		}
+		return nil, fmt.Errorf("slider getContent status: %s%s", status, extra)
 	}
 	rawImage := captchaStringifyAny(resp["image"])
 	if rawImage == "" {

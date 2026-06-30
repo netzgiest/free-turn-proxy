@@ -41,6 +41,9 @@ func (c *Client) fetchCallToken(
 		link, escapedName, token1)
 	if curToken != "" {
 		data += "&success_token=" + neturl.QueryEscape(curToken)
+		if c.log.DebugEnabled() {
+			c.log.Debugf("[STREAM %d] [VK Auth] Using cached success_token (len=%d)", streamID, len(curToken))
+		}
 	}
 
 	for attempt := 0; ; attempt++ {

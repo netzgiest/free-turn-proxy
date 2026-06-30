@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	neturl "net/url"
+	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/browserprofile"
 
@@ -84,6 +85,11 @@ func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient,
 	}
 	req.Header[fhttp.PHeaderOrderKey] = pHeaderOrder
 
+	if c.log.DebugEnabled() {
+		c.log.Debugf("[VK Auth] >>> POST %s body=%s", url, data)
+	}
+
+	start := time.Now()
 	httpResp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -98,6 +104,16 @@ func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient,
 	if err != nil {
 		return nil, err
 	}
+	elapsed := time.Since(start)
+
+	if c.log.DebugEnabled() {
+		bodySnippet := string(body)
+		if len(bodySnippet) > 2000 {
+			bodySnippet = bodySnippet[:2000] + "..."
+		}
+		c.log.Debugf("[VK Auth] <<< %s %s (%dms) status=%d body=%s", req.Method, url, elapsed.Milliseconds(), httpResp.StatusCode, bodySnippet)
+	}
+
 	var resp map[string]any
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err

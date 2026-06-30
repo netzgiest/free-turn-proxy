@@ -6,10 +6,12 @@ import (
 	"io"
 	"regexp"
 	"sync"
+	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 
+	"github.com/samosvalishe/free-turn-proxy/internal/logx"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/browserprofile"
 )
 
@@ -56,7 +58,7 @@ var (
 	fetchPHeaderOrder = []string{":method", ":path", ":authority", ":scheme"}
 )
 
-func getAPIVersion(ctx context.Context, link string, httpClient tlsclient.HttpClient, profile browserprofile.Profile, dom domainSet, logf func(format string, args ...any)) string {
+func getAPIVersion(ctx context.Context, link string, httpClient tlsclient.HttpClient, profile browserprofile.Profile, dom domainSet, log logx.Logger) string {
 	cachedAPIVersionMu.Lock()
 	defer cachedAPIVersionMu.Unlock()
 
@@ -64,25 +66,25 @@ func getAPIVersion(ctx context.Context, link string, httpClient tlsclient.HttpCl
 		return cachedAPIVersion
 	}
 
-	version, err := detectAPIVersion(ctx, link, httpClient, profile, dom)
+	version, err := detectAPIVersion(ctx, link, httpClient, profile, dom, log)
 	if err != nil {
-		if logf != nil {
-			logf("[VK Auth] API version detection failed: %v, using fallback %s", err, defaultAPIVersion)
+		if log != nil {
+			log.Infof("[VK Auth] API version detection failed: %v, using fallback %s", err, defaultAPIVersion)
 		}
 		cachedAPIVersion = defaultAPIVersion
 		return cachedAPIVersion
 	}
 
-	if logf != nil {
-		logf("[VK Auth] Detected API version: %s", version)
+	if log != nil {
+		log.Infof("[VK Auth] Detected API version: %s", version)
 	}
 	cachedAPIVersion = version
 	return cachedAPIVersion
 }
 
-func detectAPIVersion(ctx context.Context, link string, httpClient tlsclient.HttpClient, profile browserprofile.Profile, dom domainSet) (string, error) {
+func detectAPIVersion(ctx context.Context, link string, httpClient tlsclient.HttpClient, profile browserprofile.Profile, dom domainSet, log logx.Logger) (string, error) {
 	pageURL := fmt.Sprintf("https://"+dom.WebDomain+"/call/join/%s", link)
-	html, err := fetchPage(ctx, httpClient, profile, pageURL, dom)
+	html, err := fetchPage(ctx, httpClient, profile, pageURL, dom, log)
 	if err != nil {
 		return "", fmt.Errorf("fetch page: %w", err)
 	}
@@ -95,14 +97,20 @@ func detectAPIVersion(ctx context.Context, link string, httpClient tlsclient.Htt
 	for _, m := range scripts {
 		src := m[1]
 		if version := extractVersionFromURL(src); version != "" {
+			if log != nil && log.DebugEnabled() {
+				log.Debugf("[VK Auth] API version found in URL: %s", version)
+			}
 			return version, nil
 		}
 	}
 
 	for _, m := range scripts {
 		src := m[1]
-		js, err := fetchPage(ctx, httpClient, profile, src, dom)
+		js, err := fetchPage(ctx, httpClient, profile, src, dom, log)
 		if err != nil {
+			if log != nil && log.DebugEnabled() {
+				log.Debugf("[VK Auth] Failed to fetch script %s: %v", src, err)
+			}
 			continue
 		}
 		if ms := reJSAPIVersion.FindStringSubmatch(js); ms != nil {
@@ -123,7 +131,7 @@ func extractVersionFromURL(url string) string {
 	return ""
 }
 
-func fetchPage(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, url string, dom domainSet) (string, error) {
+func fetchPage(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, url string, dom domainSet, log logx.Logger) (string, error) {
 	req, err := fhttp.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
@@ -144,11 +152,20 @@ func fetchPage(ctx context.Context, httpClient tlsclient.HttpClient, profile bro
 	}
 	req.Header[fhttp.PHeaderOrderKey] = fetchPHeaderOrder
 
+	if log != nil && log.DebugEnabled() {
+		log.Debugf("[VK Auth] >>> GET %s", url)
+	}
+	start := time.Now()
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetch: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	elapsed := time.Since(start)
+	if log != nil && log.DebugEnabled() {
+		log.Debugf("[VK Auth] <<< GET %s (%dms) status=%d", url, elapsed.Milliseconds(), resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {

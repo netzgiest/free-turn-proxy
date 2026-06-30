@@ -31,6 +31,9 @@ func (c *Client) fetchAnonToken(ctx context.Context, httpClient tlsclient.HttpCl
 		data = fmt.Sprintf("client_secret=%s&client_id=%s&scopes=audio_anonymous,video_anonymous,photos_anonymous,profile_anonymous&isApiOauthAnonymEnabled=false&version=1&app_id=%s",
 			creds.ClientSecret, creds.ClientID, creds.ClientID)
 	}
+	if c.log.DebugEnabled() {
+		c.log.Debugf("[VK Auth] Fetching anon token type=%s client_id=%s domain=%s", tokenType, creds.ClientID, dom.LoginDomain)
+	}
 	resp, err := c.doRequest(ctx, httpClient, profile, data, "https://"+dom.LoginDomain+"/?act=get_anonym_token", dom)
 	if err != nil {
 		return "", err
@@ -42,6 +45,9 @@ func (c *Client) fetchAnonToken(ctx context.Context, httpClient tlsclient.HttpCl
 	token, ok := dataMap["access_token"].(string)
 	if !ok {
 		return "", fmt.Errorf("missing access_token in response: %v", resp)
+	}
+	if c.log.DebugEnabled() {
+		c.log.Debugf("[VK Auth] Anon token received (len=%d)", len(token))
 	}
 	return token, nil
 }
