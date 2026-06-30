@@ -3,6 +3,7 @@ package vkauth
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/browserprofile"
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/captcha"
@@ -32,11 +33,13 @@ func DefaultAutoSolve(
 
 	var savedProfile *browserprofile.Saved
 	if sp, err := browserprofile.Load(); err == nil {
-		log.Infof("[STREAM %d] [Captcha] Using saved real browser profile", streamID)
-		savedProfile = sp
-		// Не заменяем profile (User-Agent, sec-ch-ua, Accept-Language) сохранённым,
-		// иначе JA3-рукопожатие Firefox + заголовки Chrome Mobile = BOT от VK.
-		// Сохранённый профиль даёт только DeviceJSON + BrowserFp внутри captcha.Solve.
+		if sameBrowserFamily(profile, sp.Profile) {
+			log.Infof("[STREAM %d] [Captcha] Using saved real browser profile", streamID)
+			savedProfile = sp
+		} else {
+			log.Debugf("[STREAM %d] [Captcha] Saved browser profile (UA=%q) differs from current (UA=%q), skipping",
+				streamID, sp.UserAgent, profile.UserAgent)
+		}
 	}
 
 	successToken, err := captcha.Solve(ctx, captchaErr, streamID, client, profile, savedProfile, log)
@@ -45,4 +48,19 @@ func DefaultAutoSolve(
 	}
 	log.Infof("[STREAM %d] [Captcha] solver succeeded", streamID)
 	return successToken, nil
+}
+
+// sameBrowserFamily проверяет, что два профиля принадлежат одному семейству
+// (одинаковая ОС и браузерный движок). Несовместимые сохранённые профили
+// (например, Android Chrome Mobile при текущем Windows Firefox) пропускаются,
+// чтобы VK не видел противоречие UA ↔ device fingerprints.
+func sameBrowserFamily(a, b browserprofile.Profile) bool {
+	aWin := strings.Contains(a.UserAgent, "Windows NT")
+	bWin := strings.Contains(b.UserAgent, "Windows NT")
+	if aWin != bWin {
+		return false
+	}
+	aFirefox := strings.Contains(a.UserAgent, "Firefox") || strings.Contains(a.UserAgent, "Gecko/")
+	bFirefox := strings.Contains(b.UserAgent, "Firefox") || strings.Contains(b.UserAgent, "Gecko/")
+	return aFirefox == bFirefox
 }
