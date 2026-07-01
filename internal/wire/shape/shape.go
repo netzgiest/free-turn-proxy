@@ -1,11 +1,11 @@
-// Package shape реализует packet pacing для RTP-мимикрии: межпакетная задержка
-// с jitter (±10%) и редкими burst'ами. Оборачивает net.PacketConn/PacketListener,
-// вставляя sleep перед WriteTo; сами пакеты не меняются.
+// Package shape реализует packet pacing для RTP-мимикрии:
+// задержка между отправкой пакетов + случайный uniform jitter.
+// Оборачивает net.PacketConn, вставляя sleep перед каждым WriteTo.
+// Совместим с любой стороной — пакеты те же, только медленнее.
 package shape
 
 import (
 	"net"
-	"sync"
 	"time"
 
 	dtlsnet "github.com/pion/dtls/v3/pkg/net"
@@ -13,69 +13,67 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
 )
 
-const (
-	jitterPct    = 0.10 // доля interval для равномерного jitter (±10%)
-	burstMax     = 3    // макс. пакетов в одном burst
-	burstPercent = 30   // шанс начать burst, %
-)
-
-// Shaper управляет межпакетной задержкой. Wait безопасен для конкурентных вызовов.
+// Shaper управляет межпакетной задержкой.
 type Shaper struct {
 	interval time.Duration
-
-	mu       sync.Mutex
 	lastSend time.Time
 	burst    int // осталось пакетов в текущем burst (0 = не в burst)
+	burstMax int // макс. пакетов в burst
 }
 
-// New создаёт Shaper; interval=0 отключает pacing.
+// New создаёт Shaper. interval=0 отключает pacing.
 func New(interval time.Duration) *Shaper {
-	return &Shaper{interval: interval}
+	return &Shaper{
+		interval: interval,
+		burstMax: 3,
+	}
 }
 
+// Wait блокируется до момента, когда можно отправить следующий пакет.
 func (s *Shaper) Wait() {
 	if s.interval <= 0 {
 		return
 	}
-
-	s.mu.Lock()
-	// Burst: пакеты внутри батча идут без задержки.
+	// Burst-режим: первые burstMax пакетов идут без задержки.
 	if s.burst > 0 {
 		s.burst--
 		s.lastSend = time.Now()
-		s.mu.Unlock()
 		return
 	}
-	if randx.Intn(100) < burstPercent {
-		s.burst = randx.Intn(burstMax) // 0..burstMax-1 оставшихся после текущего
-		s.lastSend = time.Now()
-		s.mu.Unlock()
-		return
-	}
-
-	wait := s.interval - time.Since(s.lastSend)
-	if wait > 0 {
-		if jitter := time.Duration(float64(s.interval) * jitterPct); jitter > 0 {
-			wait += time.Duration(randx.Intn(int(jitter)*2+1)) - jitter
+	if s.burstMax > 0 {
+		// Случайно начинаем новый burst.
+		if randx.Intn(100) < 30 { // 30% шанс начать burst
+			s.burst = 1 + randx.Intn(s.burstMax)
+			s.burst--
+			s.lastSend = time.Now()
+			return
 		}
 	}
-	s.lastSend = time.Now().Add(max(wait, 0))
-	s.mu.Unlock()
 
-	if wait > 0 {
-		time.Sleep(wait)
+	elapsed := time.Since(s.lastSend)
+	wait := s.interval - elapsed
+	if wait <= 0 {
+		s.lastSend = time.Now()
+		return
 	}
+
+	// Uniform jitter: ±10% от interval.
+	jitter := time.Duration(float64(s.interval) * 0.10)
+	if jitter > 0 {
+		wait += time.Duration(randx.Intn(int(jitter)*2+1)) - jitter
+	}
+	if wait < 0 {
+		wait = 0
+	}
+	time.Sleep(wait)
+	s.lastSend = time.Now()
 }
 
-// ShapedPacketConn применяет pacing к WriteTo обёрнутого net.PacketConn.
+// ShapedPacketConn оборачивает net.PacketConn, применяя pacing к WriteTo.
+// ReadFrom, Close и остальные методы пробрасываются без изменений.
 type ShapedPacketConn struct {
 	net.PacketConn
 	shaper *Shaper
-}
-
-func (s *ShapedPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	s.shaper.Wait()
-	return s.PacketConn.WriteTo(b, addr)
 }
 
 // WrapPacketConn оборачивает conn с межпакетной задержкой interval.
@@ -84,10 +82,20 @@ func WrapPacketConn(conn net.PacketConn, interval time.Duration) net.PacketConn 
 	if interval <= 0 {
 		return conn
 	}
-	return &ShapedPacketConn{PacketConn: conn, shaper: New(interval)}
+	return &ShapedPacketConn{
+		PacketConn: conn,
+		shaper:     New(interval),
+	}
 }
 
-// shapedPacketListener выдаёт каждому принятому PacketConn свой Shaper.
+// WriteTo применяет pacing перед отправкой.
+func (s *ShapedPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	s.shaper.Wait()
+	return s.PacketConn.WriteTo(b, addr)
+}
+
+// shapedPacketListener оборачивает dtlsnet.PacketListener, применяя pacing
+// к WriteTo каждого принятого PacketConn.
 type shapedPacketListener struct {
 	inner    dtlsnet.PacketListener
 	interval time.Duration
@@ -101,11 +109,13 @@ func (l *shapedPacketListener) Accept() (net.PacketConn, net.Addr, error) {
 	return &ShapedPacketConn{PacketConn: pc, shaper: New(l.interval)}, addr, nil
 }
 
-func (l *shapedPacketListener) Close() error   { return l.inner.Close() }
-func (l *shapedPacketListener) Addr() net.Addr { return l.inner.Addr() }
+func (l *shapedPacketListener) Close() error                   { return l.inner.Close() }
+func (l *shapedPacketListener) Addr() net.Addr                 { return l.inner.Addr() }
+func (l *shapedPacketListener) Unwrap() dtlsnet.PacketListener { return l.inner }
 
-// WrapPacketListener добавляет pacing к WriteTo каждого принятого PacketConn
-// (server-side shaping). interval=0 возвращает оригинальный listener.
+// WrapPacketListener оборачивает dtlsnet.PacketListener, добавляя pacing
+// к WriteTo каждого принятого PacketConn (server-side shaping).
+// interval=0 возвращает оригинальный listener без обёртки.
 func WrapPacketListener(l dtlsnet.PacketListener, interval time.Duration) dtlsnet.PacketListener {
 	if interval <= 0 {
 		return l

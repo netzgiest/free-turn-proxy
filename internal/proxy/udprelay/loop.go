@@ -14,7 +14,17 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/provider"
 	"github.com/samosvalishe/free-turn-proxy/internal/proxy/common"
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
+	"github.com/samosvalishe/free-turn-proxy/internal/stats"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtcp"
+	"github.com/samosvalishe/free-turn-proxy/internal/wire/rtpopus3"
 	"github.com/samosvalishe/free-turn-proxy/internal/wire/shape"
+)
+
+// DTLS keepalive: 0xFF байт каждые 15s для предотвращения server-side EOF
+// (по аналогии с proxy-turn-vk-android/amurcanov).
+const (
+	dtlsKeepaliveInterval = 15 * time.Second
+	dtlsKeepaliveByte     = 0xFF
 )
 
 // DTLSLoop поддерживает единственное DTLS-подключение для streamID, перезапуская
@@ -199,11 +209,38 @@ func oneDTLS(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 				return
 			}
 
+			// Server-side keepalive pong (0xFF байт) - пропускаем.
+			if n == 1 && buf[0] == dtlsKeepaliveByte {
+				continue
+			}
+
 			if peerAddr := deps.ActiveLocalPeer.Load(); peerAddr != nil {
 				if addr, ok := peerAddr.(net.Addr); ok {
 					if _, err := listenConn.WriteTo(buf[:n], addr); err != nil {
 						deps.log().Errorf("[STREAM %d] failed to forward packet to local peer: %v", streamID, err)
 					}
+				}
+			}
+		}
+	})
+
+	// DTLS-keepalive: отправка 0xFF каждые 15s для предотвращения server-side EOF.
+	wg.Go(func() {
+		defer dtlscancel()
+		tick := time.NewTicker(dtlsKeepaliveInterval)
+		defer tick.Stop()
+		ping := []byte{dtlsKeepaliveByte}
+		for {
+			select {
+			case <-dtlsctx.Done():
+				return
+			case <-tick.C:
+				if err := dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					return
+				}
+				if _, err := dtlsConn.Write(ping); err != nil {
+					deps.log().Debugf("[STREAM %d] DTLS keepalive write error: %v", streamID, err)
+					return
 				}
 			}
 		}
@@ -257,6 +294,8 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 
 	wg := sync.WaitGroup{}
 	turnctx, turncancel := context.WithCancel(ctx)
+	st := stats.New(deps.log().DebugEnabled())
+	go st.LogEvery(turnctx, deps.log().Debugf, fmt.Sprintf("[STREAM %d] TURN", streamID), "to-turn", "from-turn")
 
 	context.AfterFunc(turnctx, func() {
 		if err := relayConn.SetDeadline(time.Now()); err != nil {
@@ -269,6 +308,25 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 		deps.log().Errorf("[STREAM %d] OBF init failed: %v", streamID, obfErr)
 		turncancel()
 		return
+	}
+	if c, ok := obfConn.(*rtpopus3.Conn); ok {
+		c.SetLogf(func(format string, args ...any) {
+			deps.log().Debugf("[STREAM %d][rtpopus3] "+format, append([]any{streamID}, args...)...)
+		})
+	}
+
+	// RTCP-инжектор: шлёт compound RTCP (SR+SDES/RR+SDES) рядом с OBF-пакетами,
+	// имитируя настоящий WebRTC-поток. Только для rtpopus3 — серверная сторона
+	// должна уметь пропускать RTCP-пакеты (rtpopus3/listen.go обрабатывает это).
+	// rtpopus/rtpopus2 не поддерживают RTCP-инжекцию на серверной стороне.
+	if params.Profile == "rtpopus3" {
+		obfOverhead := obfConn.Overhead()
+		inj := rtcp.Wrap(relayConn, peer, obfOverhead)
+		inj.SetLogf(func(format string, args ...any) {
+			deps.log().Debugf("[STREAM %d][rtcp] "+format, append([]any{streamID}, args...)...)
+		})
+		relayConn = inj
+		deps.log().Debugf("[STREAM %d] rtcp-injector enabled", streamID)
 	}
 
 	const maxPayload = 1600
@@ -327,9 +385,7 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			}
 
 			written, err1 := relayConn.WriteTo(out, peer)
-			if params.TrafficStats != nil {
-				params.TrafficStats.AddTx(written)
-			}
+			st.AddTx(written)
 			if err1 != nil {
 				return
 			}
@@ -348,6 +404,11 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 			if err1 != nil {
 				return
 			}
+			// Server-side RTCP packets (RR/NACK) are not OBF — skip silently
+			if n >= 8 && (buf[0]&0xC0) == 0x80 && buf[1] >= 200 && buf[1] <= 207 {
+				continue
+			}
+
 			addr1 := internalPipeAddr.Load()
 			if addr1 == nil {
 				continue
@@ -363,9 +424,7 @@ func oneTURN(ctx context.Context, deps *Deps, params *Params, peer *net.UDPAddr,
 					}
 					payload = p
 				}
-				if params.TrafficStats != nil {
-					params.TrafficStats.AddRx(len(payload))
-				}
+				st.AddRx(len(payload))
 				if _, err := conn2.WriteTo(payload, addr); err != nil {
 					return
 				}
