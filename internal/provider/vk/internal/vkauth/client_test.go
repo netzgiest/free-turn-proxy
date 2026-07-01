@@ -84,7 +84,7 @@ func TestStoreCacheGrouping(t *testing.T) {
 func TestHandleAuthErrorInvalidatesAtThreshold(t *testing.T) {
 	t.Parallel()
 
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		return "u", "p", []string{"a:1"}, nil
 	})
 
@@ -110,7 +110,7 @@ func TestFetchFallsBackThroughCredentialsList(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, creds VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, creds VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		calls.Add(1)
 		if creds.ClientID != "c" {
 			return "", "", nil, fmt.Errorf("Rate limit hit for %s", creds.ClientID)
@@ -118,15 +118,15 @@ func TestFetchFallsBackThroughCredentialsList(t *testing.T) {
 		return "user-c", "pass-c", []string{"server-c:443"}, nil
 	})
 
-	u, p, addr, err := c.GetCredentials(context.Background(), "L", 0)
+	u, p, addr, _, err := c.GetCredentials(context.Background(), "L", 0)
 	if err != nil {
 		t.Fatalf("GetCredentials: %v", err)
 	}
 	if u != "user-c" || p != "pass-c" || len(addr) != 1 || addr[0] != "server-c:443" {
 		t.Fatalf("unexpected creds: u=%q p=%q addr=%v", u, p, addr)
 	}
-	if calls.Load() != 3 {
-		t.Errorf("expected to walk all 3 creds, called %d times", calls.Load())
+	if calls.Load() != 5 {
+		t.Errorf("expected to walk all 3 creds × 2 domains (fail a.ru, a.com, b.ru, b.com, succeed c.ru), called %d times", calls.Load())
 	}
 }
 
@@ -134,12 +134,12 @@ func TestFetchShortCircuitsOnCaptchaWait(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		calls.Add(1)
 		return "", "", nil, ErrCaptchaWaitRequired
 	})
 
-	_, _, _, err := c.GetCredentials(context.Background(), "L", 0)
+	_, _, _, _, err := c.GetCredentials(context.Background(), "L", 0)
 	if err == nil || !errors.Is(err, ErrCaptchaWaitRequired) {
 		t.Fatalf("expected CAPTCHA_WAIT_REQUIRED, got %v", err)
 	}
@@ -152,17 +152,17 @@ func TestGetCredentialsCacheHit(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		calls.Add(1)
 		return "u", "p", []string{"a:1", "b:2"}, nil
 	})
 
 	// First call populates the cache.
-	if _, _, _, err := c.GetCredentials(context.Background(), "L", 0); err != nil {
+	if _, _, _, _, err := c.GetCredentials(context.Background(), "L", 0); err != nil {
 		t.Fatal(err)
 	}
 	// Second call (same stream group) must hit the cache.
-	if _, _, _, err := c.GetCredentials(context.Background(), "L", 1); err != nil {
+	if _, _, _, _, err := c.GetCredentials(context.Background(), "L", 1); err != nil {
 		t.Fatal(err)
 	}
 	if calls.Load() != 1 {
@@ -170,11 +170,11 @@ func TestGetCredentialsCacheHit(t *testing.T) {
 	}
 
 	// Sibling-stream primary round-robin: stream 0 -> addr[0], stream 1 -> addr[1].
-	_, _, addr0, err := c.GetCredentials(context.Background(), "L", 0)
+	_, _, addr0, _, err := c.GetCredentials(context.Background(), "L", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, addr1, err := c.GetCredentials(context.Background(), "L", 1)
+	_, _, addr1, _, err := c.GetCredentials(context.Background(), "L", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestGetCredentialsCacheHit(t *testing.T) {
 func TestLockoutBlocksFetch(t *testing.T) {
 	t.Parallel()
 
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		t.Fatal("tokenChain must not be called while lockout is active")
 		return "", "", nil, nil
 	})
@@ -195,7 +195,7 @@ func TestLockoutBlocksFetch(t *testing.T) {
 		t.Fatal("lockout deadline not in future")
 	}
 
-	_, _, _, err := c.GetCredentials(context.Background(), "L", 0)
+	_, _, _, _, err := c.GetCredentials(context.Background(), "L", 0)
 	if err == nil || !errors.Is(err, ErrLockoutActive) {
 		t.Fatalf("expected lockout error, got %v", err)
 	}
@@ -204,19 +204,19 @@ func TestLockoutBlocksFetch(t *testing.T) {
 func TestThrottleHonorsContextCancel(t *testing.T) {
 	t.Parallel()
 
-	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar) (string, string, []string, error) {
+	c := newTestClient(t, func(_ context.Context, _ string, _ int, _ VKCredentials, _ tlsclient.CookieJar, _ domainSet) (string, string, []string, error) {
 		return "u", "p", []string{"a:1"}, nil
 	})
 	// Force throttle to wait long enough that ctx-cancel wins.
 	c.minFetchIntervalFn = func() time.Duration { return time.Hour }
 	// Prime lastFetchTime so the next call will throttle.
-	if _, _, _, err := c.GetCredentials(context.Background(), "L1", 0); err != nil {
+	if _, _, _, _, err := c.GetCredentials(context.Background(), "L1", 0); err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, _, err := c.GetCredentials(ctx, "L2", 100) // different cache group -> miss cache
+	_, _, _, _, err := c.GetCredentials(ctx, "L2", 100) // different cache group -> miss cache
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}

@@ -122,12 +122,12 @@ func main() {
 	}
 	logger.Infof("provider=%s", prov.Name())
 
-	getCreds := func(ctx context.Context, streamID int) (string, string, []string, error) {
+	getCreds := func(ctx context.Context, streamID int) (string, string, []string, time.Time, error) {
 		c, err := prov.GetCredentials(ctx, streamID)
 		if err != nil {
-			return "", "", nil, err
+			return "", "", nil, time.Time{}, err
 		}
-		return c.User, c.Pass, c.ServerAddrs, nil
+		return c.User, c.Pass, c.ServerAddrs, c.ExpiresAt, nil
 	}
 
 	// Несколько -links расширяют пул: каждый звонок даёт cfg.TURN.N стримов,

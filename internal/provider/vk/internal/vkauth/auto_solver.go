@@ -11,7 +11,10 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 )
 
-func (c *Client) defaultAutoSolve(
+// DefaultAutoSolve запускает in-page widget flow. Загружает сохранённый профиль
+// браузера, если доступен, - капча видит стабильные fingerprints на этапе
+// загрузки страницы и POST-запроса.
+func DefaultAutoSolve(
 	ctx context.Context,
 	captchaErr *captcha.Error,
 	streamID int,
@@ -29,25 +32,14 @@ func (c *Client) defaultAutoSolve(
 	}
 
 	var savedProfile *browserprofile.Saved
-	switch sp, err := browserprofile.Load(); {
-	case err == nil && savedProfileUsable(*sp):
-		savedFamily := browserprofile.Family(sp.Profile)
-		log.Infof("[STREAM %d] [Captcha] Using captured browser profile (authority) family=%s mobile=%t ua=%q device=%t browser_fp=%t",
-			streamID, savedFamily, browserprofile.IsMobile(sp.Profile), sp.UserAgent, sp.DeviceJSON != "", sp.BrowserFp != "")
-		savedProfile = sp
-		profile = sp.Profile
-		if savedFamily != "" && normalizeFamily(savedFamily) != normalizeFamily(c.browser) {
-			if rebuilt, rebuildErr := c.newTLSClientForKind(savedFamily, tlsclient.NewCookieJar()); rebuildErr == nil {
-				client = rebuilt
-				log.Infof("[STREAM %d] [Captcha] Rebuilt TLS client to match captured family=%s", streamID, savedFamily)
-			} else {
-				log.Warnf("[STREAM %d] [Captcha] Failed to rebuild TLS for captured family=%s: %v; keeping -browser TLS", streamID, savedFamily, rebuildErr)
-			}
+	if sp, err := browserprofile.Load(); err == nil {
+		if sameBrowserFamily(profile, sp.Profile) {
+			log.Infof("[STREAM %d] [Captcha] Using saved real browser profile", streamID)
+			savedProfile = sp
+		} else {
+			log.Debugf("[STREAM %d] [Captcha] Saved browser profile (UA=%q) differs from current (UA=%q), skipping",
+				streamID, sp.UserAgent, profile.UserAgent)
 		}
-	case err == nil:
-		log.Warnf("[STREAM %d] [Captcha] Captured profile unusable (empty UA); using -browser fallback", streamID)
-	default:
-		log.Debugf("[STREAM %d] [Captcha] No captured browser profile: %v", streamID, err)
 	}
 
 	successToken, err := captcha.Solve(ctx, captchaErr, streamID, client, profile, savedProfile, log)
@@ -58,15 +50,17 @@ func (c *Client) defaultAutoSolve(
 	return successToken, nil
 }
 
-func savedProfileUsable(saved browserprofile.Saved) bool {
-	return strings.TrimSpace(saved.UserAgent) != ""
-}
-
-func normalizeFamily(k browserprofile.Kind) browserprofile.Kind {
-	switch k {
-	case browserprofile.Firefox, browserprofile.Safari:
-		return k
-	default:
-		return browserprofile.Chrome
+// sameBrowserFamily проверяет, что два профиля принадлежат одному семейству
+// (одинаковая ОС и браузерный движок). Несовместимые сохранённые профили
+// (например, Android Chrome Mobile при текущем Windows Firefox) пропускаются,
+// чтобы VK не видел противоречие UA ↔ device fingerprints.
+func sameBrowserFamily(a, b browserprofile.Profile) bool {
+	aWin := strings.Contains(a.UserAgent, "Windows NT")
+	bWin := strings.Contains(b.UserAgent, "Windows NT")
+	if aWin != bWin {
+		return false
 	}
+	aFirefox := strings.Contains(a.UserAgent, "Firefox") || strings.Contains(a.UserAgent, "Gecko/")
+	bFirefox := strings.Contains(b.UserAgent, "Firefox") || strings.Contains(b.UserAgent, "Gecko/")
+	return aFirefox == bFirefox
 }

@@ -5,6 +5,9 @@
 // резолв UDP-адреса, dial UDP-или-TCP (с SplitFirstWriteConn поверх TCP),
 // turn.NewClient, Listen, Allocate. Возвращает relay PacketConn и Close,
 // который разрушает аллокацию, TURN-клиент и транспорт.
+//
+// В Open также запускается goroutine keepalive: TURN Binding Request каждые 10s
+// (по аналогии с proxy-turn-vk-android), предотвращающая таймаут аллокации.
 package turndial
 
 import (
@@ -20,6 +23,12 @@ import (
 	"github.com/samosvalishe/free-turn-proxy/internal/randx"
 )
 
+const turnKeepaliveInterval = 10 * time.Second
+
+// credentialLeadTime - за сколько до expiry закрывать аллокацию, чтобы
+// TURNLoop успел пересоздать её со свежими credentials (make-before-break).
+const credentialLeadTime = 30 * time.Second
+
 // Config конфигурирует один вызов Open.
 type Config struct {
 	// HostOverride, если непустой, заменяет host из lookup credentials.
@@ -30,9 +39,15 @@ type Config struct {
 	TransportUDP bool
 	// DialTimeout ограничивает TCP dial. Ноль -> 5s.
 	DialTimeout time.Duration
+	// CredentialExpiry - время истечения TURN credentials. Если не zero,
+	// Open запускает watchdog, который за credentialLeadTime до expiry
+	// закрывает аллокацию (make-before-break), чтобы TURNLoop создал новую
+	// со свежими credentials до того, как старая умрёт от 401.
+	CredentialExpiry time.Time
 }
 
 // Stream - активная TURN-аллокация с зависимостями. Close разрушает в обратном порядке.
+// Внутренний keepalive-goroutine шлёт Binding Request каждые 10s (turnKeepaliveInterval).
 type Stream struct {
 	// Relay - выделенный relay PacketConn из turn.Client.Allocate.
 	Relay net.PacketConn
@@ -154,11 +169,49 @@ func Open(ctx context.Context, cfg Config, peer *net.UDPAddr, user, pass, rawAdd
 		return nil, fmt.Errorf("TURN allocate: %w", err)
 	}
 
+	// Keepalive goroutine: TURN Binding Request каждые 10s, чтобы аллокация
+	// не умирала по таймауту (аналог proxy-turn-vk-android).
+	keepaliveCtx, keepaliveStop := context.WithCancel(ctx)
+	go func() {
+		tick := time.NewTicker(turnKeepaliveInterval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-keepaliveCtx.Done():
+				return
+			case <-tick.C:
+				if _, err := client.SendBindingRequest(); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// Watchdog: make-before-break — закрываем аллокацию за credentialLeadTime
+	// до истечения credentials, чтобы TURNLoop пересоздал со свежими.
+	if !cfg.CredentialExpiry.IsZero() {
+		go func() {
+			wait := time.Until(cfg.CredentialExpiry) - credentialLeadTime
+			if wait <= 0 {
+				wait = 0
+			}
+			select {
+			case <-keepaliveCtx.Done():
+				return
+			case <-time.After(wait):
+			}
+			// Закрываем relay — data-path падает, oneTURN выходит,
+			// TURNLoop перезапускается со свежими credentials.
+			_ = relay.Close()
+		}()
+	}
+
 	return &Stream{
 		Relay:         relay,
 		ServerUDPAddr: turnServerUDPAddr,
 		PermDead:      permDead,
-		close: func() error {
+		close: func() error { //nolint:unparam
+			keepaliveStop()
 			var firstErr error
 			if cerr := relay.Close(); cerr != nil {
 				firstErr = cerr

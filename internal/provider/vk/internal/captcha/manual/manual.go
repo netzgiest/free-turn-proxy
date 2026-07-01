@@ -68,9 +68,12 @@ func localCaptchaHosts() []string {
 
 func isAllowedProxyHost(hostname string) bool {
 	allowed := []string{
-		".vk.com", ".vk.ru", ".vkontakte.ru",
+		".vk.ru", ".vkontakte.ru",
+		".vk.com",
 		".userapi.com", ".okcdn.ru", ".mycdn.me",
-		".api.vk.com", ".api.vk.ru",
+		".api.vk.ru",
+		".static.vk.ru",
+		".mail.ru",
 	}
 	for _, suffix := range allowed {
 		if strings.HasSuffix(hostname, suffix) || hostname == suffix[1:] {
@@ -548,7 +551,7 @@ func startCaptchaServer(srv *http.Server, logPrefix string) error {
 
 // runCaptchaServerAndWait открывает браузер и ждёт токен решения.
 // При срабатывании ctx возвращает ctx.Err(); в обоих случаях HTTP-сервер останавливается.
-func runCaptchaServerAndWait(ctx context.Context, handler http.Handler, captchaURL string, keyCh <-chan string, logPrefix string, present func(string)) (string, error) {
+func runCaptchaServerAndWait(ctx context.Context, handler http.Handler, captchaURL string, keyCh <-chan string, logPrefix string) (string, error) {
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
 	if err := startCaptchaServer(srv, logPrefix); err != nil {
@@ -572,7 +575,8 @@ func runCaptchaServerAndWait(ctx context.Context, handler http.Handler, captchaU
 	fmt.Println("==============================================")
 	fmt.Println()
 
-	present(captchaURL)
+	Log.Infof("[%s] Opening browser...", logPrefix)
+	openBrowser(captchaURL)
 
 	select {
 	case key := <-keyCh:
@@ -622,7 +626,7 @@ button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
 		_, _ = fmt.Fprint(w, `<!DOCTYPE html><html><body><h2>Done!</h2></body></html>`)
 	})
 
-	return runCaptchaServerAndWait(ctx, mux, localCaptchaOrigin(), keyCh, "captcha HTTP server error", openBrowser)
+	return runCaptchaServerAndWait(ctx, mux, localCaptchaOrigin(), keyCh, "captcha HTTP server error")
 }
 
 type loggingTransport struct {
@@ -663,7 +667,6 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 						SecChUa:         req.Header.Get("Sec-Ch-Ua"),
 						SecChUaMobile:   req.Header.Get("Sec-Ch-Ua-Mobile"),
 						SecChUaPlatform: req.Header.Get("Sec-Ch-Ua-Platform"),
-						AcceptLanguage:  req.Header.Get("Accept-Language"),
 					},
 					DeviceJSON: device,
 					BrowserFp:  browserFp,
@@ -683,18 +686,6 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // переписывая абсолютные URL так, чтобы браузер всё время оставался на
 // 127.0.0.1:8765; возвращает результирующий auth-токен.
 func SolveViaProxy(ctx context.Context, redirectURI string, dialer net.Dialer) (string, error) {
-	return solveViaProxy(ctx, redirectURI, dialer, openBrowser)
-}
-
-// SolveViaProxyWithPresenter передаёт URL вызывающему после запуска сервера.
-func SolveViaProxyWithPresenter(ctx context.Context, redirectURI string, dialer net.Dialer, present func(string)) (string, error) {
-	if present == nil {
-		present = func(string) {}
-	}
-	return solveViaProxy(ctx, redirectURI, dialer, present)
-}
-
-func solveViaProxy(ctx context.Context, redirectURI string, dialer net.Dialer, present func(string)) (string, error) {
 	keyCh := make(chan string, 1)
 
 	targetURL, err := neturl.Parse(redirectURI)
@@ -848,7 +839,10 @@ func solveViaProxy(ctx context.Context, redirectURI string, dialer net.Dialer, p
 				// разрешаем cross-origin доступ к ресурсу
 				res.Header.Set("Access-Control-Allow-Origin", "*")
 
-				// captchaNotRobot.check идёт через /generic_proxy на api.vk.com/api.vk.ru.
+				// captchaNotRobot.check уходит на api.vk.ru (другой хост, чем
+				// upstream vk.ru), поэтому идёт через /generic_proxy. Извлекаем
+				// success_token здесь - серверный путь работает на iOS даже если
+				// JS-callback в браузере не сработал.
 				if strings.Contains(targetAuthURL, "captchaNotRobot.check") {
 					bodyBytes, readErr := io.ReadAll(res.Body)
 					if readErr == nil {
@@ -876,7 +870,7 @@ func solveViaProxy(ctx context.Context, redirectURI string, dialer net.Dialer, p
 		proxy.ServeHTTP(w, r)
 	})
 
-	return runCaptchaServerAndWait(ctx, mux, localCaptchaURLForTarget(targetURL), keyCh, "proxy HTTP server error", present)
+	return runCaptchaServerAndWait(ctx, mux, localCaptchaURLForTarget(targetURL), keyCh, "proxy HTTP server error")
 }
 
 func openBrowser(url string) {

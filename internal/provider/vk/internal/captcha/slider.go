@@ -32,7 +32,6 @@ type sliderGuess struct {
 	Score         int64
 	ScoreRGB      int64
 	ScoreLuma     int64
-	ScoreReverse  int64
 	ScoreText     float64
 	ConsensusRank int
 }
@@ -41,30 +40,28 @@ func (s *captchaSession) solveSliderCaptcha(
 	sessionToken string,
 	browserFP string,
 	hash string,
-	content captchaContentRef,
+	settings string,
 	debugInfo string,
 ) (string, error) {
-	if content.Value == "" {
-		return "", errors.New("slider content settings missing")
-	}
-	s.logger().Debugf("[Captcha] slider getContent source=%s len=%d", content.Source, len(content.Value))
 	values := [][2]string{
 		{"session_token", sessionToken},
-		{"domain", s.domain},
+		{"domain", "vk.ru"},
 		{"adFp", ""},
 		{"access_token", ""},
-		{"captcha_settings", content.Value},
+		{"captcha_settings", settings},
 	}
 
 	resp, err := s.captchaRequest("captchaNotRobot.getContent", values)
 	if err != nil {
-		return "", fmt.Errorf("slider getContent failed: %w", err)
+		s.logger().Debugf("[Captcha] slider getContent request failed, trying checkbox fallback: %v", err)
+		return s.solveCheckboxCaptcha(sessionToken, browserFP, hash, debugInfo)
 	}
 	puzzle, err := parseSliderPuzzle(resp)
 	if err != nil {
-		return "", err
+		s.logger().Debugf("[Captcha] slider puzzle parse failed, trying checkbox fallback: %v", err)
+		return s.solveCheckboxCaptcha(sessionToken, browserFP, hash, debugInfo)
 	}
-	s.logger().Debugf("[Captcha] slider puzzle decoded: grid=%d attempts=%d swaps=%d", puzzle.Size, puzzle.Attempts, len(puzzle.Swaps))
+	Log.Debugf("[Captcha] slider puzzle decoded: grid=%d attempts=%d swaps=%d", puzzle.Size, puzzle.Attempts, len(puzzle.Swaps))
 
 	guesses, err := rankSliderGuesses(puzzle.Image, puzzle.Size, puzzle.Swaps)
 	if err != nil {
@@ -78,18 +75,15 @@ func (s *captchaSession) solveSliderCaptcha(
 	if limit <= 0 {
 		return "", errors.New("slider has no attempts available")
 	}
-	s.logger().Debugf("[Captcha] slider guesses ranked: total=%d limit=%d", len(guesses), limit)
+	Log.Debugf("[Captcha] slider guesses ranked: total=%d limit=%d", len(guesses), limit)
 
 	deviceJSON := captchaDeviceInfo
-	deviceSource := "default"
 	if s.savedProfile != nil && strings.TrimSpace(s.savedProfile.DeviceJSON) != "" {
 		deviceJSON = s.savedProfile.DeviceJSON
-		deviceSource = "saved"
 	}
-	s.logger().Debugf("[Captcha] slider componentDone device_source=%s device_bytes=%d", deviceSource, len(deviceJSON))
 	if _, err := s.captchaRequest("captchaNotRobot.componentDone", [][2]string{
 		{"session_token", sessionToken},
-		{"domain", s.domain},
+		{"domain", "vk.ru"},
 		{"adFp", ""},
 		{"access_token", ""},
 		{"browser_fp", browserFP},
@@ -99,7 +93,7 @@ func (s *captchaSession) solveSliderCaptcha(
 	}
 
 	for i := 0; i < limit; i++ {
-		s.logger().Debugf("[Captcha] slider attempt %d/%d (guess #%d)", i+1, limit, guesses[i].Index)
+		Log.Debugf("[Captcha] slider attempt %d/%d (guess #%d)", i+1, limit, guesses[i].Index)
 		answerData, err := json.Marshal(struct {
 			Value []int `json:"value"`
 		}{Value: guesses[i].Swaps})
@@ -117,12 +111,11 @@ func (s *captchaSession) solveSliderCaptcha(
 		if err != nil {
 			return "", err
 		}
-		s.logger().Debugf("[Captcha] slider attempt %d status=%s show_type=%s token_len=%d", i+1, check.Status, check.ShowType, len(check.SuccessToken))
 		if strings.EqualFold(check.Status, "ok") {
 			if check.SuccessToken == "" {
 				return "", errors.New("captcha success token not found")
 			}
-			s.logger().Infof("[Captcha] slider accepted on attempt %d", i+1)
+			Log.Infof("[Captcha] slider accepted on attempt %d", i+1)
 			return check.SuccessToken, nil
 		}
 		if strings.EqualFold(check.Status, "error_limit") {
@@ -139,7 +132,12 @@ func parseSliderPuzzle(raw map[string]any) (*sliderPuzzle, error) {
 	}
 	status := captchaStringifyAny(resp["status"])
 	if !strings.EqualFold(status, "ok") {
-		return nil, fmt.Errorf("slider getContent status: %s", status)
+		errMsg := captchaStringifyAny(resp["error"])
+		extra := ""
+		if errMsg != "" {
+			extra = ": " + errMsg
+		}
+		return nil, fmt.Errorf("slider getContent status: %s%s", status, extra)
 	}
 	rawImage := captchaStringifyAny(resp["image"])
 	if rawImage == "" {
@@ -220,15 +218,6 @@ func rankSliderGuesses(img image.Image, gridSize int, swaps []int) ([]sliderGues
 		}
 		guesses[idx-1] = sliderGuess{Index: idx, Swaps: active}
 		guesses[idx-1].ScoreLuma = seamScoreLuma(img, gridSize, mapping)
-		if len(active) > 2 {
-			reverseMapping, err := applySliderSwaps(gridSize, reverseSwapPairs(active))
-			if err != nil {
-				return nil, err
-			}
-			guesses[idx-1].ScoreReverse = seamScoreLuma(img, gridSize, reverseMapping)
-		} else {
-			guesses[idx-1].ScoreReverse = guesses[idx-1].ScoreLuma
-		}
 	}
 
 	lumaOrder := append([]sliderGuess(nil), guesses...)
@@ -244,6 +233,9 @@ func rankSliderGuesses(img image.Image, gridSize int, swaps []int) ([]sliderGues
 	}
 
 	stage2Count := candidateCount
+	if stage2Count > 12 {
+		stage2Count = 12
+	}
 	stage2Set := make(map[int]struct{}, stage2Count)
 	for i := 0; i < stage2Count; i++ {
 		stage2Set[lumaOrder[i].Index] = struct{}{}
@@ -329,21 +321,9 @@ func rankSliderGuesses(img image.Image, gridSize int, swaps []int) ([]sliderGues
 		textRank[g.Index] = rank
 	}
 
-	reverseOrder := append([]sliderGuess(nil), guesses...)
-	sort.SliceStable(reverseOrder, func(i, j int) bool {
-		if reverseOrder[i].ScoreReverse == reverseOrder[j].ScoreReverse {
-			return reverseOrder[i].Index < reverseOrder[j].Index
-		}
-		return reverseOrder[i].ScoreReverse < reverseOrder[j].ScoreReverse
-	})
-	reverseRank := make(map[int]int, len(reverseOrder))
-	for rank, g := range reverseOrder {
-		reverseRank[g.Index] = rank
-	}
-
 	for i := range guesses {
 		g := &guesses[i]
-		g.ConsensusRank = lumaRank[g.Index] + reverseRank[g.Index]
+		g.ConsensusRank = lumaRank[g.Index]
 		if _, ok := stage2Set[g.Index]; ok {
 			g.ConsensusRank += rgbRank[g.Index] + textRank[g.Index]
 		} else {
@@ -362,14 +342,6 @@ func rankSliderGuesses(img image.Image, gridSize int, swaps []int) ([]sliderGues
 		return guesses[i].ConsensusRank < guesses[j].ConsensusRank
 	})
 	return guesses, nil
-}
-
-func reverseSwapPairs(swaps []int) []int {
-	out := make([]int, 0, len(swaps))
-	for i := len(swaps) - 2; i >= 0; i -= 2 {
-		out = append(out, swaps[i], swaps[i+1])
-	}
-	return out
 }
 
 func activeSwapsForIndex(swaps []int, index int) []int {
@@ -615,45 +587,41 @@ func buildSliderCursor(candidateIndex int, candidateCount int) string {
 	targetX := baseTargetX + randx.Intn(10) - 5
 	targetY := 655 + randx.Intn(14)
 
-	points := make([]cursorPoint, 0, 128)
+	points := make([]cursorPoint, 0, 28)
 
-	for i := 0; i < 4+randx.Intn(8); i++ {
+	for i := 0; i < 1+randx.Intn(3); i++ {
 		points = append(points, cursorPoint{
 			X: startX + randx.Intn(5) - 2,
 			Y: startY + randx.Intn(5) - 2,
 		})
 	}
 
-	transitSteps := 32 + randx.Intn(26)
+	transitSteps := 2 + randx.Intn(3)
 	arcOffX := randx.Intn(60) - 30
 	arcOffY := -(randx.Intn(30) + 10)
 	for i := 1; i <= transitSteps; i++ {
-		t := easeInOut(float64(i) / float64(transitSteps+1))
+		t := float64(i) / float64(transitSteps+1)
 		cx := float64(startX+targetX)/2 + float64(arcOffX)
 		cy := float64(startY+targetY)/2 + float64(arcOffY)
 		bx := (1-t)*(1-t)*float64(startX) + 2*t*(1-t)*cx + t*t*float64(targetX)
 		by := (1-t)*(1-t)*float64(startY) + 2*t*(1-t)*cy + t*t*float64(targetY)
-		jitter := int((1-t)*5) + 1
+		jitter := int((1-t)*8) + 2
 		points = append(points, cursorPoint{
 			X: int(math.Round(bx)) + randx.Intn(jitter*2+1) - jitter,
 			Y: int(math.Round(by)) + randx.Intn(jitter*2+1) - jitter,
 		})
-		if i%9 == 0 && randx.Intn(3) == 0 {
-			last := points[len(points)-1]
-			points = append(points, last)
-		}
 	}
 
-	approachSteps := 16 + randx.Intn(14)
+	approachSteps := 4 + randx.Intn(4)
 	prev := points[len(points)-1]
 	for i := 1; i <= approachSteps; i++ {
-		t := easeOut(float64(i) / float64(approachSteps))
+		t := float64(i) / float64(approachSteps)
 		ax := prev.X + int(math.Round(t*float64(targetX-prev.X))) + randx.Intn(5) - 2
 		ay := prev.Y + int(math.Round(t*float64(targetY-prev.Y))) + randx.Intn(5) - 2
 		points = append(points, cursorPoint{X: ax, Y: ay})
 	}
 
-	settleCount := 18 + randx.Intn(24)
+	settleCount := 3 + randx.Intn(5)
 	for i := 0; i < settleCount; i++ {
 		points = append(points, cursorPoint{
 			X: targetX + randx.Intn(7) - 3,
@@ -666,17 +634,4 @@ func buildSliderCursor(candidateIndex int, candidateCount int) string {
 		return "[]"
 	}
 	return string(data)
-}
-
-func easeInOut(t float64) float64 {
-	if t < 0.5 {
-		return 2 * t * t
-	}
-	p := -2*t + 2
-	return 1 - p*p/2
-}
-
-func easeOut(t float64) float64 {
-	p := 1 - t
-	return 1 - p*p*p
 }

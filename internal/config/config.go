@@ -48,7 +48,7 @@ type TURNOpts struct {
 }
 
 // ObfProfile выбирает wire-профиль обфускации TURN-payload.
-// Профили живут в internal/wire/<profile>/ - сейчас только rtpopus,
+// Профили живут в internal/wire/<profile>/ - rtpopus, rtpopus2, rtpopus3,
 // под добавление новых (rtph264, vp8 и т.д.).
 type ObfProfile string
 
@@ -61,7 +61,7 @@ const (
 
 // ObfOpts - опции обфускации TURN-payload.
 type ObfOpts struct {
-	Profile ObfProfile    // -obf-profile: none (default) | rtpopus | rtpopus2
+	Profile ObfProfile    // -obf-profile: none (default) | rtpopus | rtpopus2 | rtpopus3
 	Key     []byte        // -obf-key (декодированный): 32-байтовый общий ключ; nil если Profile=none
 	GenKey  bool          // -gen-obf-key: напечатать новый ключ и выйти
 	Timing  time.Duration // -obf-timing: межпакетная задержка (RTP-мимикрия); 0=выкл
@@ -78,13 +78,17 @@ type ProxyOpts struct {
 	Peer    string    // -peer: адрес серверного прокси, куда дозванивается клиент (только клиент)
 }
 
-// Browser выбирает браузерный профиль для control-plane запросов VK-провайдера.
+// Browser выбирает браузерный профиль (UA + TLS JA3 + client hints) для
+// control-plane запросов VK-провайдера. firefox несёт меньше client hints
+// (sec-ch-ua* - Chromium-only), chrome даёт herd-cover.
 type Browser string
 
 const (
 	BrowserChrome  Browser = "chrome"
 	BrowserFirefox Browser = "firefox"
 	BrowserSafari  Browser = "safari"
+	BrowserOpera   Browser = "opera"
+	BrowserRandom  Browser = "random" // каждая сессия со случайным браузером
 )
 
 // VKOpts - опции VK-учёток и captcha (только клиент, провайдер "vk").
@@ -92,7 +96,7 @@ type VKOpts struct {
 	Links          []string // -links (нормализованные join-коды); несколько = больше стримов
 	StreamsPerCred int      // -streams-per-cred
 	ManualCaptcha  bool     // -manual-captcha
-	Browser        Browser  // -browser: chrome | firefox | safari
+	Browser        Browser  // -browser: chrome | firefox
 }
 
 // ProviderOpts выбирает реализацию provider.Provider.
@@ -191,7 +195,7 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 	streamsPerCred := fs.Int("streams-per-cred", defaultStreamsPerCache, "TURN-потоков на один кеш VK-creds; только -provider vk")
 	debug := fs.Bool("debug", false, "подробные debug-логи")
 	manualCaptcha := fs.Bool("manual-captcha", false, "ручная VK captcha в браузере вместо авто; только -provider vk")
-	browser := fs.String("browser", string(BrowserFirefox), "браузерный профиль VK-auth: chrome | firefox | safari; только -provider vk")
+	browser := fs.String("browser", string(BrowserRandom), "браузерный профиль VK-auth: chrome | firefox | safari | opera | random (default); только -provider vk")
 	dnsMode := fs.String("dns-mode", dnsModeAuto, "резолвер клиента: plain | doh | auto")
 	dnsServers := fs.String("dns-servers", "", "свои UDP/53 DNS через запятую: ip[:port][,ip[:port]...]")
 	clientID := fs.String("client-id", "", "уникальный ID клиента (автогенерация если не задан)")
@@ -335,9 +339,10 @@ func ParseClient(args []string, errOut io.Writer) (*Client, error) {
 			return nil, fmt.Errorf("-streams-per-cred must be positive")
 		}
 		switch c.VK.Browser {
-		case BrowserChrome, BrowserFirefox, BrowserSafari:
+		case BrowserChrome, BrowserFirefox, BrowserSafari, BrowserOpera, BrowserRandom:
 		default:
-			return nil, fmt.Errorf("invalid -browser value %q: must be %s | %s | %s", c.VK.Browser, BrowserChrome, BrowserFirefox, BrowserSafari)
+			return nil, fmt.Errorf("invalid -browser value %q: must be %s | %s | %s | %s | %s",
+				c.VK.Browser, BrowserChrome, BrowserFirefox, BrowserSafari, BrowserOpera, BrowserRandom)
 		}
 		rawLinks := strings.Split(*links, ",")
 		if len(rawLinks) == 1 && rawLinks[0] == "" {
@@ -437,6 +442,7 @@ func ParseServer(args []string, errOut io.Writer) (*Server, error) {
 	if s.Proxy.Connect == "" {
 		return nil, fmt.Errorf("server address is required")
 	}
+
 	if err := validateObfProfile(s.Obf.Profile); err != nil {
 		return nil, err
 	}

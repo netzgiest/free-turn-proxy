@@ -35,11 +35,14 @@ func ParseError(errData map[string]any) *Error {
 		return nil
 	}
 
-	captchaSid, ok := errData["captcha_sid"].(string)
-	if !ok {
-		if sidNum, ok2 := errData["captcha_sid"].(float64); ok2 {
-			captchaSid = fmt.Sprintf("%.0f", sidNum)
-		}
+	var captchaSid string
+	if sidStr, sidOK := errData["captcha_sid"].(string); sidOK {
+		captchaSid = sidStr
+	} else if sidNum, sidOK := errData["captcha_sid"].(float64); sidOK {
+		captchaSid = fmt.Sprintf("%.0f", sidNum)
+	}
+	if captchaSid == "" {
+		Log.Debugf("[Captcha] captcha_sid missing in error data (new captcha format)")
 	}
 
 	captchaImg, _ := errData["captcha_img"].(string)

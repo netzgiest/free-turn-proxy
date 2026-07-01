@@ -127,7 +127,7 @@ func TestParseClient_BrowserSafari(t *testing.T) {
 }
 
 func TestParseClient_BrowserInvalid(t *testing.T) {
-	args := append(validClientArgs(), "-browser", "opera")
+	args := append(validClientArgs(), "-browser", "edge")
 	_, err := ParseClient(args, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "invalid -browser") {
 		t.Errorf("expected browser error, got %v", err)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	neturl "net/url"
+	"time"
 
 	"github.com/samosvalishe/free-turn-proxy/internal/provider/vk/internal/browserprofile"
 
@@ -14,32 +15,81 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 )
 
+var (
+	chromeHeaderOrder = []string{
+		"host",
+		"dnt",
+		"content-length",
+		"sec-ch-ua-platform",
+		"accept-language",
+		"sec-ch-ua",
+		"content-type",
+		"sec-ch-ua-mobile",
+		"user-agent",
+		"accept",
+		"origin",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"priority",
+	}
+	firefoxHeaderOrder = []string{
+		"host",
+		"dnt",
+		"content-length",
+		"user-agent",
+		"content-type",
+		"accept",
+		"origin",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"priority",
+	}
+	pHeaderOrder = []string{":method", ":path", ":authority", ":scheme"}
+)
+
 // doRequest отправляет POST form-запрос по url через tls-клиент с браузерным
 // профилем и десериализует JSON-тело ответа.
-func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, data, url string) (map[string]any, error) {
+// domainSet определяет Origin/Referer (vk.ru или vk.com).
+func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient, profile browserprofile.Profile, data, url string, dom domainSet) (map[string]any, error) {
 	parsedURL, err := neturl.Parse(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse request URL: %w", err)
 	}
-	domain := parsedURL.Hostname()
+	reqDomain := parsedURL.Hostname()
 
 	req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer([]byte(data)))
 	if err != nil {
 		return nil, err
 	}
-	req.Host = domain
+	req.Host = reqDomain
 	browserprofile.ApplyFhttp(req, profile)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Origin", "https://vk.ru")
-	req.Header.Set("Referer", "https://vk.ru/")
+	req.Header.Set("Origin", "https://"+dom.WebDomain)
+	req.Header.Set("Referer", "https://"+dom.WebDomain+"/")
 	req.Header.Set("Sec-Fetch-Site", "same-site")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
-	if browserprofile.Family(profile) != browserprofile.Firefox {
-		req.Header.Set("Priority", "u=1, i")
+	req.Header.Set("Priority", "u=1, i")
+
+	if profile.SecChUa != "" {
+		req.Header[fhttp.HeaderOrderKey] = chromeHeaderOrder
+	} else {
+		req.Header[fhttp.HeaderOrderKey] = firefoxHeaderOrder
+	}
+	req.Header[fhttp.PHeaderOrderKey] = pHeaderOrder
+
+	if c.log.DebugEnabled() {
+		c.log.Debugf("[VK Auth] >>> POST %s body=%s", url, data)
 	}
 
+	start := time.Now()
 	httpResp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -54,6 +104,16 @@ func (c *Client) doRequest(ctx context.Context, httpClient tlsclient.HttpClient,
 	if err != nil {
 		return nil, err
 	}
+	elapsed := time.Since(start)
+
+	if c.log.DebugEnabled() {
+		bodySnippet := string(body)
+		if len(bodySnippet) > 2000 {
+			bodySnippet = bodySnippet[:2000] + "..."
+		}
+		c.log.Debugf("[VK Auth] <<< %s %s (%dms) status=%d body=%s", req.Method, url, elapsed.Milliseconds(), httpResp.StatusCode, bodySnippet)
+	}
+
 	var resp map[string]any
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err

@@ -30,7 +30,9 @@ type TurnCredentials struct {
 //
 //nolint:gosec // public VK SDK app credentials, not user secrets
 var DefaultCredentials = []VKCredentials{
-	{ClientID: "6287487", ClientSecret: "QbYic1K3lEV5kTGiqlq2"},  // VK_WEB_APP_ID
+	{ClientID: "6287487", ClientSecret: "QbYic1K3lEV5kTGiqlq2"},  // VK_WEB_APP_ID (secret 1)
+	{ClientID: "6287487", ClientSecret: "MuAxFaKDYDOICzGnEOhp"},  // VK_WEB_APP_ID (secret 2, from proxy-turn-vk-android)
+	{ClientID: "8202606", ClientSecret: "lMRsTiMCyPnp5vfoldmn"},  // VK_WEB_APP_ID 2 (from proxy-turn-vk-android)
 	{ClientID: "7879029", ClientSecret: "aR5NKGmm03GYrCiNKsaw"},  // VK_MVK_APP_ID
 	{ClientID: "2274003", ClientSecret: "hHbZxrka2uZ6jB1inYsH"},  // VK_ANDROID_APP
 	{ClientID: "51453752", ClientSecret: "4UyuCUsdK8pVCNoeQuGi"}, // VK_MESSENGER_DESKTOP
@@ -44,8 +46,13 @@ const APIVersion = "5.282"
 const (
 	CredentialLifetime = 10 * time.Minute
 	CacheSafetyMargin  = 60 * time.Second
-	MaxCacheErrors     = 3
-	ErrorWindow        = 10 * time.Second
+
+	// RefreshLeadTime - за сколько до expiry начинать фоновое обновление
+	// credentials, чтобы при re-allocate не ждать VK API.
+	RefreshLeadTime = 90 * time.Second
+
+	MaxCacheErrors = 3
+	ErrorWindow    = 10 * time.Second
 
 	DefaultStreamsPerCache = 10
 )
@@ -59,4 +66,26 @@ var (
 	ErrCaptchaWaitRequired   = errors.Join(provider.ErrBackoffActive, errors.New("CAPTCHA_WAIT_REQUIRED"))
 	ErrFatalCaptchaNoStreams = errors.Join(provider.ErrFatalNoStreams, errors.New("FATAL_CAPTCHA_FAILED_NO_STREAMS"))
 	ErrLockoutActive         = errors.New("global lockout active")
+)
+
+// domainSet содержит домены для одного варианта VK API (vk.ru или vk.com).
+// Перебор начинается с DomainVkRu; если все credentials упали с сетевой
+// ошибкой, переходим на DomainVkCom.
+type domainSet struct {
+	LoginDomain string
+	APIDomain   string
+	WebDomain   string
+}
+
+var (
+	DomainVkRu = domainSet{
+		LoginDomain: "login.vk.ru",
+		APIDomain:   "api.vk.ru",
+		WebDomain:   "vk.ru",
+	}
+	DomainVkCom = domainSet{
+		LoginDomain: "login.vk.com",
+		APIDomain:   "api.vk.com",
+		WebDomain:   "vk.com",
+	}
 )

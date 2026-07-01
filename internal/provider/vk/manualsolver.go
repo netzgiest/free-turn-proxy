@@ -13,7 +13,7 @@ import (
 var proxyManualMu sync.Mutex
 
 // ProxyManualSolver показывает UI после запуска локального captcha-прокси.
-func ProxyManualSolver(show func(url string), hide func()) ManualSolverFunc {
+func ProxyManualSolver(_ func(url string), hide func()) ManualSolverFunc {
 	return func(ctx context.Context, e *captcha.Error, dialer net.Dialer) (string, string, error) {
 		if e.RedirectURI == "" {
 			return "", "", fmt.Errorf("manual captcha: no redirect_uri")
@@ -25,7 +25,7 @@ func ProxyManualSolver(show func(url string), hide func()) ManualSolverFunc {
 			defer hide()
 		}
 
-		token, err := manualcaptcha.SolveViaProxyWithPresenter(ctx, e.RedirectURI, dialer, show)
+		token, err := manualcaptcha.SolveViaProxy(ctx, e.RedirectURI, dialer)
 		return token, "", err
 	}
 }

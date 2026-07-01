@@ -18,15 +18,17 @@ func (c *Client) fetchTurnCreds(
 	profile browserprofile.Profile,
 	streamID int,
 	link, token2, sessionKey string,
+	dom domainSet,
 ) (user, pass string, addresses []string, err error) {
 	data := fmt.Sprintf(
 		"joinLink=%s&isVideo=false&protocolVersion=5&capabilities=2F7F&anonymToken=%s&method=vchat.joinConversationByLink&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
 		link, token2, sessionKey,
 	)
-	resp, err := c.doRequest(ctx, httpClient, profile, data, "https://calls.okcdn.ru/fb.do")
+	resp, err := c.doRequest(ctx, httpClient, profile, data, "https://calls.okcdn.ru/fb.do", dom)
 	if err != nil {
 		return "", "", nil, err
 	}
+	c.log.Debugf("[STREAM %d] [VK Auth] vchat.joinConversationByLink response: %v", streamID, resp)
 
 	tsRaw, ok := resp["turn_server"].(map[string]any)
 	if !ok {
