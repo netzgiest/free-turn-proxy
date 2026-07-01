@@ -12,7 +12,10 @@ import (
 
 // ClientInfo содержит метаданные о клиенте
 type ClientInfo struct {
-	Comment string `json:"comment,omitempty"`
+	Comment          string `json:"comment,omitempty"`
+	WireGuardPubKey  string `json:"wg_pub_key,omitempty"`
+	WireGuardAddress string `json:"wg_address,omitempty"`
+	WireGuardConfig  string `json:"wg_config,omitempty"` // полный WG client.conf для встраивания в freeturn://
 }
 
 // Data структура JSON-файла
@@ -25,6 +28,7 @@ type DB struct {
 	mu           sync.RWMutex
 	path         string
 	data         Data
+	raw          []byte // raw JSON всего файла (для embedded-режима с конфигом)
 	lastModified time.Time
 }
 
@@ -73,6 +77,20 @@ func (db *DB) Add(clientID, comment string) error {
 	return db.save()
 }
 
+// AddWithWG добавляет клиента с WireGuard-данными (pub key + адрес + конфиг)
+func (db *DB) AddWithWG(clientID, comment, wgPubKey, wgAddress, wgConfig string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	db.data.Clients[clientID] = ClientInfo{
+		Comment:          comment,
+		WireGuardPubKey:  wgPubKey,
+		WireGuardAddress: wgAddress,
+		WireGuardConfig:  wgConfig,
+	}
+	return db.save()
+}
+
 // Remove удаляет клиента
 func (db *DB) Remove(clientID string) error {
 	db.mu.Lock()
@@ -115,6 +133,7 @@ func (db *DB) load() error {
 	}
 
 	db.data = d
+	db.raw = b
 	db.lastModified = stat.ModTime()
 	return nil
 }
@@ -137,7 +156,24 @@ func (db *DB) loadIfModified() {
 }
 
 func (db *DB) save() error {
-	b, err := json.MarshalIndent(db.data, "", "  ")
+	var b []byte
+	var err error
+
+	if db.raw != nil {
+		// Embedded mode: сохраняем clients внутрь существующего JSON, не теряя остальные поля
+		var full map[string]any
+		if e := json.Unmarshal(db.raw, &full); e != nil {
+			return e
+		}
+		clientsMap := make(map[string]ClientInfo, len(db.data.Clients))
+		for k, v := range db.data.Clients {
+			clientsMap[k] = v
+		}
+		full["clients"] = clientsMap
+		b, err = json.MarshalIndent(full, "", "  ")
+	} else {
+		b, err = json.MarshalIndent(db.data, "", "  ")
+	}
 	if err != nil {
 		return err
 	}

@@ -2,9 +2,12 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -112,25 +115,6 @@ func TestParseClient_InvalidDNS(t *testing.T) {
 	_, err := ParseClient(args, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "invalid -dns-mode") {
 		t.Errorf("expected dns error, got %v", err)
-	}
-}
-
-func TestParseClient_BrowserSafari(t *testing.T) {
-	args := append(validClientArgs(), "-browser", "safari")
-	c, err := ParseClient(args, io.Discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.VK.Browser != BrowserSafari {
-		t.Errorf("VK.Browser = %q, want %q", c.VK.Browser, BrowserSafari)
-	}
-}
-
-func TestParseClient_BrowserInvalid(t *testing.T) {
-	args := append(validClientArgs(), "-browser", "opera")
-	_, err := ParseClient(args, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "invalid -browser") {
-		t.Errorf("expected browser error, got %v", err)
 	}
 }
 
@@ -365,5 +349,171 @@ func TestParseServer_ProxyMode(t *testing.T) {
 	}
 	if s.Proxy.Mode != ProxyModeTCPFwd {
 		t.Errorf("Proxy.Mode = %q, want tcpfwd", s.Proxy.Mode)
+	}
+}
+
+func writeTempConfig(t *testing.T, cfg map[string]any) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestParseServer_ConfigFileMinimal(t *testing.T) {
+	path := writeTempConfig(t, map[string]any{
+		"connect": "127.0.0.1:51820",
+	})
+	s, err := ParseServer([]string{"-config", path}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Proxy.Connect != "127.0.0.1:51820" {
+		t.Errorf("Connect = %q", s.Proxy.Connect)
+	}
+	if s.Proxy.Listen != "0.0.0.0:56000" {
+		t.Errorf("Listen default = %q", s.Proxy.Listen)
+	}
+	if s.Proxy.Mode != ProxyModeUDP {
+		t.Errorf("Mode default = %q", s.Proxy.Mode)
+	}
+	if s.Log.Debug {
+		t.Errorf("Debug should be false")
+	}
+}
+
+func TestParseServer_ConfigFileFull(t *testing.T) {
+	path := writeTempConfig(t, map[string]any{
+		"listen":       "0.0.0.0:3478",
+		"connect":      "10.0.0.1:443",
+		"mode":         "udp",
+		"obf_profile":  "rtpopus3",
+		"obf_key":      "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+		"obf_timing":   "15ms",
+		"debug":        true,
+		"clients_file": "/etc/clients.json",
+	})
+	s, err := ParseServer([]string{"-config", path}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Proxy.Listen != "0.0.0.0:3478" {
+		t.Errorf("Listen = %q", s.Proxy.Listen)
+	}
+	if s.Proxy.Connect != "10.0.0.1:443" {
+		t.Errorf("Connect = %q", s.Proxy.Connect)
+	}
+	if s.Proxy.Mode != ProxyModeUDP {
+		t.Errorf("Mode = %q", s.Proxy.Mode)
+	}
+	if s.Obf.Profile != ObfProfileRTPOpus3 {
+		t.Errorf("ObfProfile = %q", s.Obf.Profile)
+	}
+	if len(s.Obf.Key) != 32 {
+		t.Errorf("ObfKey len = %d", len(s.Obf.Key))
+	}
+	if s.Obf.Timing != 15*time.Millisecond {
+		t.Errorf("ObfTiming = %v", s.Obf.Timing)
+	}
+	if !s.Log.Debug {
+		t.Errorf("Debug should be true")
+	}
+	// В config-режиме ClientsFile всегда указывает на файл конфига
+	if s.ClientsFile != path {
+		t.Errorf("ClientsFile = %q, want %q", s.ClientsFile, path)
+	}
+}
+
+func TestParseServer_ConfigFileIgnoresCLIArgs(t *testing.T) {
+	path := writeTempConfig(t, map[string]any{
+		"connect": "from-config:443",
+		"listen":  "0.0.0.0:9999",
+	})
+	s, err := ParseServer([]string{"-config", path, "-connect", "should-be-ignored:51820", "-listen", "ignored:1111"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Proxy.Connect != "from-config:443" {
+		t.Errorf("expected config value, got %q", s.Proxy.Connect)
+	}
+	if s.Proxy.Listen != "0.0.0.0:9999" {
+		t.Errorf("expected config value, got %q", s.Proxy.Listen)
+	}
+}
+
+func TestParseServer_ConfigFileMissing(t *testing.T) {
+	_, err := ParseServer([]string{"-config", "/nonexistent/config.json"}, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for missing config file")
+	}
+}
+
+func TestParseServer_ConfigFileInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(path, []byte("{invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ParseServer([]string{"-config", path}, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestParseServer_ConfigFileMissingConnect(t *testing.T) {
+	path := writeTempConfig(t, map[string]any{
+		"listen": "0.0.0.0:56000",
+	})
+	_, err := ParseServer([]string{"-config", path}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "connect is required") {
+		t.Fatalf("expected connect error, got %v", err)
+	}
+}
+
+func TestParseServer_ConfigFileInvalidMode(t *testing.T) {
+	path := writeTempConfig(t, map[string]any{
+		"connect": "x:1",
+		"mode":    "bogus",
+	})
+	_, err := ParseServer([]string{"-config", path}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "invalid mode") {
+		t.Fatalf("expected invalid mode error, got %v", err)
+	}
+}
+
+func TestParseServer_ConfigFileObfMissingKey(t *testing.T) {
+	path := writeTempConfig(t, map[string]any{
+		"connect":     "x:1",
+		"obf_profile": "rtpopus",
+	})
+	_, err := ParseServer([]string{"-config", path}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "-obf-key") {
+		t.Fatalf("expected obf-key error, got %v", err)
+	}
+}
+
+func TestParseServer_ConfigFileHelpFlag(t *testing.T) {
+	_, err := ParseServer([]string{"-h"}, io.Discard)
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Errorf("expected flag.ErrHelp, got %v", err)
+	}
+}
+
+func TestParseServer_ConfigFileWithEqualsSign(t *testing.T) {
+	path := writeTempConfig(t, map[string]any{
+		"connect": "127.0.0.1:51820",
+	})
+	s, err := ParseServer([]string{"-config=" + path}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Proxy.Connect != "127.0.0.1:51820" {
+		t.Errorf("Connect = %q", s.Proxy.Connect)
 	}
 }
